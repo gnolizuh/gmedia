@@ -12,7 +12,9 @@ type connState int
 type conn struct {
 	server     *Server
 	state      connState
-	epoch      uint32
+	lepoch     uint32
+	repoch     uint32
+	digest     []byte
 	rwc        net.Conn
 	remoteAddr string
 	bufr       *bufio.Reader
@@ -64,7 +66,8 @@ func (srv *Server) newConn(rwc net.Conn) *conn {
 	c := &conn{
 		server: srv,
 		state:  StateServerSendChallenge,
-		epoch:  time.Now().UnixNano() / 1000,
+		lepoch: time.Now().UnixNano() / 1000,
+		repoch: 0,
 		rwc:    rwc,
 	}
 	return c

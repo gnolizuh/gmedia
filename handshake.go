@@ -6,6 +6,10 @@ import (
 	"bytes"
 	"math/rand"
 	"encoding/binary"
+	"io"
+	"log"
+	"errors"
+	"fmt"
 )
 
 /* RTMP handshake :
@@ -64,7 +68,6 @@ const (
 
 	HandshakeKeyLen = 32
 	HandshakeChallengeSize = 1537
-	HandshakeResponseSize = HandshakeChallengeSize - 1
 )
 
 const (
@@ -94,7 +97,7 @@ func makeDigest(b []byte, key string, offs uint32) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-func findDigest(b []byte, key string, base uint32) (bool, error) {
+func findDigest(b []byte, key string, base uint32) (bool, uint32) {
 	offs := uint32(0)
 	for n := uint32(0); n < 4; n++ {
 		offs += uint32(b[base + n])
@@ -103,10 +106,10 @@ func findDigest(b []byte, key string, base uint32) (bool, error) {
 
 	hs, err := makeDigest(b, key, offs)
 	if err != nil {
-		return false, err
+		return false, 0
 	}
 
-	return bytes.Equal(b[offs:], hs), nil
+	return bytes.Equal(b[offs:], hs), offs
 }
 
 func writeDigest(b []byte, key string, base uint32) error {
@@ -139,8 +142,9 @@ func (c *conn) handshake() error {
 	for c.state != StateServerDone {
 		switch c.state {
 		case StateServerSendChallenge:
-			err = c.sendChanllenge(ServerVersion, ClientPartialKey)
+			err = c.sendChallenge(ServerVersion, ServerPartialKey)
 		case StateServerRecvChallenge:
+			err = c.recvChallenge(ClientPartialKey, ServerFullKey)
 		case StateServerSendResponse:
 		case StateServerRecvResponse:
 		}
@@ -156,22 +160,61 @@ func (c *conn) handshake() error {
 }
 
 // send S0 + S1
-func (c *conn) sendChanllenge(version, key string) error {
-	s0 := make([]byte, HandshakeChallengeSize)
+func (c *conn) sendChallenge(version, key string) error {
+	s01 := make([]byte, HandshakeChallengeSize)
 
 	// s0, version MUST be 0x03
-	s0[0] = RTMPVersion
+	s01[0] = RTMPVersion
 
 	// s1
-	binary.BigEndian.PutUint32(s0[1:5], c.epoch) // timestamp
-	copy(s0[5:9], []byte(version))               // version(zero)
+	binary.BigEndian.PutUint32(s01[1:5], c.lepoch) // timestamp
+	copy(s01[5:9], []byte(version))                // version(zero)
 
-	makeRandom(s0[9:])                           // random
-	if err := writeDigest(s0[1:], key, 0); err != nil {
+	makeRandom(s01[9:])                            // random
+	if err := writeDigest(s01[1:], key, 0); err != nil {
 		return err
 	}
 
-	c.bufw.Write(s0)
+	c.bufw.Write(s01)
+
+	return nil
+}
+
+// recv C0 + C1
+func (c *conn) recvChallenge(pkey, fkey string) error {
+	c01 := make([]byte, HandshakeChallengeSize)
+	if _, err := io.ReadFull(c.bufr, c01); err != nil {
+		return err
+	}
+
+	// c0, version MUST be 0x03
+	if c01[0] != RTMPVersion {
+		return errors.New(fmt.Sprintf("handshake: unexpected RTMP version: %d", int(c01[0])))
+	}
+
+	// c1
+	c.repoch = binary.BigEndian.Uint32(c01[1:5]) // timestamp
+
+	log.Printf("handshake: peer version=%d.%d.%d.%d epoch=%d", c01[8], c01[7], c01[6], c01[5], c.repoch)
+
+	if uint32(c01[5:9]) == 0 {
+		return nil
+	}
+
+	find, offs := findDigest(c01[1:], pkey, 772)
+	if !find {
+		find, offs = findDigest(c01[1:], pkey, 8)
+	}
+
+	if !find {
+		return errors.New("handshake: digest not found")
+	}
+
+	var err error
+	c.digest, err = makeDigest(c01[1 + offs:], fkey, offs)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
