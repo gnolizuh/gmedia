@@ -4,6 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"bytes"
+	"math/rand"
+	"encoding/binary"
 )
 
 /* RTMP handshake :
@@ -58,8 +60,19 @@ const (
 		0x0C, 0x00, 0x0D, 0x0E,
 	}
 
+	RTMPVersion = '\x03'
+
 	HandshakeKeyLen = 32
-	HandshakeBufSize = 1537
+	HandshakeChallengeSize = 1537
+	HandshakeResponseSize = HandshakeChallengeSize - 1
+)
+
+const (
+	StateServerSendChallenge connState = iota
+	StateServerRecvChallenge
+	StateServerSendResponse
+	StateServerRecvResponse
+	StateServerDone
 )
 
 func makeDigest(b []byte, key string, offs uint32) ([]byte, error) {
@@ -88,29 +101,77 @@ func findDigest(b []byte, key string, base uint32) (bool, error) {
 	}
 	offs = (offs % 728) + base + 4
 
-	dig, err := makeDigest(b, key, offs)
+	hs, err := makeDigest(b, key, offs)
 	if err != nil {
 		return false, err
 	}
 
-	return bytes.Equal(b[offs:], dig), nil
+	return bytes.Equal(b[offs:], hs), nil
 }
 
-func writeDigest(b []byte, key string, base uint32) ([]byte, error) {
+func writeDigest(b []byte, key string, base uint32) error {
 	offs := uint32(0)
 	for n := uint32(8); n < 12; n++ {
 		offs += uint32(b[base + n])
 	}
 	offs = (offs % 728) + base + 12;
 
-	dig, err := makeDigest(b, key, offs)
+	hs, err := makeDigest(b, key, offs)
 	if err != nil {
-		return false, err
+		return err
 	}
 
-	return dig, nil
+	for n, h := range hs {
+		b[offs + n] = h
+	}
+
+	return nil
 }
 
-func handshake(c *conn) error {
+func makeRandom(p []byte) {
+	for n := 0; n < len(p); n++ {
+		p[n] = byte(rand.Int())
+	}
+}
+
+func (c *conn) handshake() error {
+	var err error
+	for c.state != StateServerDone {
+		switch c.state {
+		case StateServerSendChallenge:
+			err = c.sendChanllenge(ServerVersion, ClientPartialKey)
+		case StateServerRecvChallenge:
+		case StateServerSendResponse:
+		case StateServerRecvResponse:
+		}
+
+		if err != nil {
+			return err
+		}
+
+		c.state ++
+	}
+
+	return nil
+}
+
+// send S0 + S1
+func (c *conn) sendChanllenge(version, key string) error {
+	s0 := make([]byte, HandshakeChallengeSize)
+
+	// s0, version MUST be 0x03
+	s0[0] = RTMPVersion
+
+	// s1
+	binary.BigEndian.PutUint32(s0[1:5], c.epoch) // timestamp
+	copy(s0[5:9], []byte(version))               // version(zero)
+
+	makeRandom(s0[9:])                           // random
+	if err := writeDigest(s0[1:], key, 0); err != nil {
+		return err
+	}
+
+	c.bufw.Write(s0)
+
 	return nil
 }
