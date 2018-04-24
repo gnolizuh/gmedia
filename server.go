@@ -66,7 +66,7 @@ func (srv *Server) newConn(rwc net.Conn) *conn {
 	c := &conn{
 		server: srv,
 		state:  StateServerSendChallenge,
-		lepoch: time.Now().UnixNano() / 1000,
+		lepoch: uint32(time.Now().UnixNano() / 1000),
 		repoch: 0,
 		rwc:    rwc,
 	}
