@@ -25,10 +25,17 @@ type conn struct {
 func (c *conn) serve() {
 	c.remoteAddr = c.rwc.RemoteAddr().String()
 
-	c.bufr = bufio.NewReader(c)
-	c.bufw = bufio.NewWriter(c)
+	c.bufr = bufio.NewReader(c.rwc)
+	c.bufw = bufio.NewWriter(c.rwc)
 
-	c.handshake()
+	err := c.handshake()
+	if err != nil {
+		return
+	}
+
+	/* for {
+		msg, err := c.readMessage()
+	} */
 }
 
 type Handler interface {

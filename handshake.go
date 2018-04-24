@@ -72,10 +72,10 @@ var (
 )
 
 const (
-	StateServerSendChallenge connState = iota
-	StateServerRecvChallenge
-	StateServerSendResponse
+	StateServerRecvChallenge connState = iota
+	StateServerSendChallenge
 	StateServerRecvResponse
+	StateServerSendResponse
 	StateServerDone
 )
 
@@ -142,14 +142,14 @@ func (c *conn) handshake() error {
 	var err error
 	for c.state != StateServerDone {
 		switch c.state {
-		case StateServerSendChallenge:
-			err = c.sendChallenge(ServerVersion, ServerPartialKey)
 		case StateServerRecvChallenge:
 			err = c.recvChallenge(ClientPartialKey, ServerFullKey)
-		case StateServerSendResponse:
-		    err = c.sendResponse()
+		case StateServerSendChallenge:
+			err = c.sendChallenge(ServerVersion, ServerPartialKey)
 		case StateServerRecvResponse:
-		    err = c.recvResponse()
+			err = c.recvResponse()
+		case StateServerSendResponse:
+			err = c.sendResponse()
 		}
 
 		if err != nil {
@@ -184,7 +184,7 @@ func (c *conn) sendChallenge(version, key []byte) error {
 }
 
 // recv C0 + C1
-func (c *conn) recvChallenge(pkey, fkey []byte) error {
+func (c *conn) recvChallenge(ckey, skey []byte) error {
 	c01 := make([]byte, HandshakeChallengeSize)
 	if _, err := io.ReadFull(c.bufr, c01); err != nil {
 		return err
@@ -204,9 +204,9 @@ func (c *conn) recvChallenge(pkey, fkey []byte) error {
 		return nil
 	}
 
-	find, offs := findDigest(c01[1:], pkey, 772)
+	find, offs := findDigest(c01[1:], ckey, 772)
 	if !find {
-		find, offs = findDigest(c01[1:], pkey, 8)
+		find, offs = findDigest(c01[1:], ckey, 8)
 	}
 
 	if !find {
@@ -214,7 +214,7 @@ func (c *conn) recvChallenge(pkey, fkey []byte) error {
 	}
 
 	var err error
-	c.digest, err = makeDigest(c01[1 + offs:], fkey, offs)
+	c.digest, err = makeDigest(c01[1 + offs:], skey, offs)
 	if err != nil {
 		return err
 	}
