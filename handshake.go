@@ -77,6 +77,12 @@ const (
 	StateServerRecvResponse
 	StateServerSendResponse
 	StateServerDone
+
+	StateClientSendChallenge
+	StateClientRecvChallenge
+	StateClientSendResponse
+	StateClientRecvResponse
+	StataClientDone
 )
 
 func makeDigest(b, key []byte, offs uint32) ([]byte, error) {
@@ -140,7 +146,8 @@ func makeRandom(p []byte) {
 
 func (c *conn) handshake() error {
 	var err error
-	for c.state != StateServerDone {
+	run := true
+	for run {
 		switch c.state {
 		case StateServerRecvChallenge:
 			err = c.recvChallenge(ClientPartialKey, ServerFullKey)
@@ -150,6 +157,18 @@ func (c *conn) handshake() error {
 			err = c.recvResponse()
 		case StateServerSendResponse:
 			err = c.sendResponse()
+		case StateServerDone:
+			run = false
+		case StateClientSendChallenge:
+			err = c.sendChallenge(ClientVersion, ClientPartialKey)
+		case StateClientRecvChallenge:
+			err = c.recvChallenge(ServerPartialKey, ClientFullKey)
+		case StateClientSendResponse:
+			err = c.sendResponse()
+		case StateClientRecvResponse:
+			err = c.recvResponse()
+		case StataClientDone:
+			run = false
 		}
 
 		if err != nil {
