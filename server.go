@@ -4,39 +4,8 @@ import (
 	"net"
 	"time"
 	"bufio"
+	"sync"
 )
-
-type connState int
-
-// A conn represents the server side of an RTMP connection.
-type conn struct {
-	server     *Server
-	state      connState
-	lepoch     uint32
-	repoch     uint32
-	digest     []byte
-	rwc        net.Conn
-	remoteAddr string
-	bufr       *bufio.Reader
-	bufw       *bufio.Writer
-}
-
-// Serve a new connection.
-func (c *conn) serve() {
-	c.remoteAddr = c.rwc.RemoteAddr().String()
-
-	c.bufr = bufio.NewReader(c.rwc)
-	c.bufw = bufio.NewWriter(c.rwc)
-
-	err := c.handshake()
-	if err != nil {
-		return
-	}
-
-	/* for {
-		msg, err := c.readMessage()
-	} */
-}
 
 type Handler interface {
 	ServeRTMP(*Client)
@@ -71,12 +40,25 @@ func (srv *Server) ListenAndServe() error {
 // Create new connection from rwc.
 func (srv *Server) newConn(rwc net.Conn) *conn {
 	c := &conn{
-		server: srv,
-		state:  StateServerSendChallenge,
-		lepoch: uint32(time.Now().UnixNano() / 1000),
-		repoch: 0,
-		rwc:    rwc,
+		server:     srv,
+		state:      StateServerSendChallenge,
+		repoch:     0,
+		rwc:        rwc,
+		chunkSize:  DefaultChunkSize,
 	}
+
+	c.lepoch = uint32(time.Now().UnixNano() / 1000)
+	c.remoteAddr = rwc.RemoteAddr().String()
+	c.bufr = bufio.NewReader(rwc)
+	c.bufw = bufio.NewWriter(rwc)
+	c.streams = make([]*Stream, MaxStreamsNum)
+	c.chunkPool = &sync.Pool{
+		New: func() interface{} {
+			ck := make([]byte, c.chunkSize)
+			return &ck
+		},
+	}
+
 	return c
 }
 

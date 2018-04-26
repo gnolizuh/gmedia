@@ -193,13 +193,17 @@ func (c *conn) sendChallenge(version, key []byte) error {
 	copy(s01[5:9], version)                        // version(zero)
 
 	makeRandom(s01[9:])                            // random
-	if err := writeDigest(s01[1:], key, 0); err != nil {
+	err := writeDigest(s01[1:], key, 0)
+	if err != nil {
 		return err
 	}
 
-	c.bufw.Write(s01)
+	_, err = c.bufw.Write(s01)
+	if err != nil {
+		return err
+	}
 
-	return nil
+	return c.bufw.Flush()
 }
 
 // recv C0 + C1
@@ -258,9 +262,12 @@ func (c *conn) sendResponse() error {
 		s2[offs + uint32(n)] = h
 	}
 
-	c.bufw.Write(s2)
+	_, err = c.bufw.Write(s2)
+	if err != nil {
+		return err
+	}
 
-	return nil
+	return c.bufw.Flush()
 }
 
 // recv C2
