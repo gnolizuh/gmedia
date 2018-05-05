@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"net"
 	"bufio"
+	"errors"
+	"fmt"
 )
 
 const (
@@ -26,6 +28,7 @@ const (
 )
 
 type Header struct {
+	fmt       uint8
 	csid      uint32
 	timestamp uint32
 	mlen      uint32
@@ -80,7 +83,7 @@ func (c *conn) serve() {
 	} */
 }
 
-func (c *conn) setChunkSize(chunkSize uint32) {
+func (c *conn) SetChunkSize(chunkSize uint32) {
 	if c.chunkSize != chunkSize {
 		c.chunkPool = &sync.Pool{
 			New: func() interface{} {
@@ -91,12 +94,9 @@ func (c *conn) setChunkSize(chunkSize uint32) {
 	}
 }
 
-func (c *conn) readMessage() (error) {
-	hd := Header{}
+func (c *conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 	off := 0
-	b := headerPool.Get().(*[]byte)
-
-	_, err := io.ReadFull(c.bufr, (*b)[off:off+1])
+	_, err := io.ReadFull(c.bufr, b[off:off+1])
 	if err != nil {
 		return err
 	}
@@ -110,11 +110,11 @@ func (c *conn) readMessage() (error) {
 	 * |fmt|   cs id   |
 	 * +-+-+-+-+-+-+-+-+
 	 */
-	fmt := uint8(((*b)[off] >> 6) & 0x03)
-	hd.csid = uint32((*b)[off] & 0x3f)
+	hdr.fmt = uint8((b[off] >> 6) & 0x03)
+	hdr.csid = uint32(b[off] & 0x3f)
 
 	off += 1
-	if hd.csid == 0 {
+	if hdr.csid == 0 {
 		/*
 		 * ID is computed as (the second byte + 64).
 		 *
@@ -123,14 +123,14 @@ func (c *conn) readMessage() (error) {
 		 * |fmt|     0     |  cs id - 64   |
 		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		 */
-		hd.csid = 64
-		_, err := io.ReadFull(c.bufr, (*b)[off:off+1])
+		hdr.csid = 64
+		_, err := io.ReadFull(c.bufr, b[off:off+1])
 		if err != nil {
-			return err
+			return 0, err
 		}
-		hd.csid += uint32((*b)[off])
+		hdr.csid += uint32(b[off])
 		off += 1
-	} else if hd.csid == 1 {
+	} else if hdr.csid == 1 {
 		/*
 		 * ID is computed as ((the third byte)*256 +
 		 * (the second byte) + 64).
@@ -140,43 +140,123 @@ func (c *conn) readMessage() (error) {
 		 * |fmt|     1     |           cs id - 64          |
 		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		 */
-		hd.csid = 64
-		_, err := io.ReadFull(c.bufr, (*b)[off:off+2])
+		hdr.csid = 64
+		_, err := io.ReadFull(c.bufr, b[off:off+2])
 		if err != nil {
-			return err
+			return 0, err
 		}
-		hd.csid += uint32((*b)[off])
-		hd.csid += 256 * uint32((*b)[off+1])
+		hdr.csid += uint32(b[off])
+		hdr.csid += 256 * uint32(b[off+1])
 		off += 2
 	}
 
-	if fmt <= 2 {
-		_, err := io.ReadFull(c.bufr, (*b)[off:off+4])
+	if hdr.fmt <= 2 {
+		_, err := io.ReadFull(c.bufr, b[off:off+4])
 		if err != nil {
-			return err
+			return 0, err
 		}
 
-		hd.timestamp = binary.BigEndian.Uint32((*b)[off:off+4])
+		hdr.timestamp = binary.BigEndian.Uint32(b[off:off+4])
 		off += 4
-		if fmt <= 1 {
-			_, err := io.ReadFull(c.bufr, (*b)[off:off+4])
+		if hdr.fmt <= 1 {
+			_, err := io.ReadFull(c.bufr, b[off:off+4])
 			if err != nil {
-				return err
+				return 0, err
 			}
 
-			hd.mlen = binary.BigEndian.Uint32((*b)[off:off+4])
+			hdr.mlen = binary.BigEndian.Uint32(b[off:off+4])
 			off += 4
-			if fmt == 0 {
-				_, err := io.ReadFull(c.bufr, (*b)[off:off+4])
+			if hdr.fmt == 0 {
+				_, err := io.ReadFull(c.bufr, b[off:off+4])
 				if err != nil {
 					return err
 				}
 
-				hd.msid = binary.BigEndian.Uint32((*b)[off:off+4])
+				hdr.msid = binary.BigEndian.Uint32(b[off:off+4])
 				off += 4
 			}
 		}
 	}
+
+	return off, nil
+}
+
+func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
+	//  0                   1                   2                   3
+	//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |                   timestamp                   |message length |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |     message length (cont)     |message type id| msg stream id |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |           message stream id (cont)            |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	off := 0
+	if hdr.fmt <= 2 {
+		_, err := io.ReadFull(c.bufr, b[off:off+3])
+		if err != nil {
+			return 0, err
+		}
+		hdr.timestamp = uint32(b[off+2]) | uint32(b[off+1])<<8 | uint32(b[off])<<16
+		off += 3
+
+		if hdr.fmt <= 1 {
+			_, err := io.ReadFull(c.bufr, b[off:off+3])
+			if err != nil {
+				return 0, err
+			}
+			hdr.mlen = uint32(b[off+2]) | uint32(b[off+1])<<8 | uint32(b[off])<<16
+			off += 3
+			hdr.typo = uint8(b[off])
+			off += 1
+
+			if hdr.fmt == 0 {
+				_, err := io.ReadFull(c.bufr, b[off:off+4])
+				if err != nil {
+					return 0, err
+				}
+				hdr.msid = binary.BigEndian.Uint32(b[off:off+4])
+				off += 4
+			}
+		}
+	}
+
+	if hdr.timestamp == 0x00ffffff {
+		_, err := io.ReadFull(c.bufr, b[off:off+4])
+		if err != nil {
+			return 0, err
+		}
+		hdr.timestamp = binary.BigEndian.Uint32(b[off:off+4])
+		off += 4
+	}
+
+	return off, nil
+}
+
+func (c *conn) ReadMessage() error {
+	hdr := Header{}
+	b := headerPool.Get().(*[]byte)
+	p := *b
+
+	// read basic header.
+	n, err := c.readBasicHeader(p, &hdr)
+	if err != nil {
+		return err
+	}
+
+	if hdr.csid > MaxStreamsNum {
+		return errors.New(fmt.Sprintf("RTMP in chunk stream too big: %d >= %d", hdr.csid, MaxStreamsNum))
+	}
+
+	// read chunk message header.
+	p = p[n:]
+	n, err = c.readChunkMessageHeader(p, &hdr)
+	if err != nil {
+		return err
+	}
+
+	// TODO: read total message.
+	// c.readMessage()
 
 	return nil
 }
