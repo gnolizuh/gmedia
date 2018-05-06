@@ -140,8 +140,8 @@ func (c *conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 	 * |fmt|   cs id   |
 	 * +-+-+-+-+-+-+-+-+
 	 */
-	hdr.fmt = uint8((b[off] >> 6) & 0x03)
-	hdr.csid = uint32(b[off] & 0x3f)
+	hdr.fmt = (uint8(b[off] >> 6) & 0x03)
+	hdr.csid = uint32(uint8(b[off]) & 0x3f)
 
 	off += 1
 	if hdr.csid == 0 {
@@ -203,7 +203,7 @@ func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 		off += 3
 
 		if hdr.fmt <= 1 {
-			_, err := io.ReadFull(c.bufr, b[off:off+3])
+			_, err := io.ReadFull(c.bufr, b[off:off+4])
 			if err != nil {
 				return 0, err
 			}

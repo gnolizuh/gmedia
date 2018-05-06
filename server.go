@@ -40,7 +40,7 @@ func (srv *Server) ListenAndServe() error {
 // Create new connection from rwc.
 func (srv *Server) newConn(rwc net.Conn) *conn {
 	c := &conn{
-		state:     StateServerSendChallenge,
+		state:     StateServerRecvChallenge,
 		repoch:    0,
 		rwc:       rwc,
 		chunkSize: DefaultChunkSize,
