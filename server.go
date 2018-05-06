@@ -40,18 +40,17 @@ func (srv *Server) ListenAndServe() error {
 // Create new connection from rwc.
 func (srv *Server) newConn(rwc net.Conn) *conn {
 	c := &conn{
-		server:     srv,
-		state:      StateServerSendChallenge,
-		repoch:     0,
-		rwc:        rwc,
-		chunkSize:  DefaultChunkSize,
+		state:     StateServerSendChallenge,
+		repoch:    0,
+		rwc:       rwc,
+		chunkSize: DefaultChunkSize,
 	}
 
 	c.lepoch = uint32(time.Now().UnixNano() / 1000)
 	c.remoteAddr = rwc.RemoteAddr().String()
 	c.bufr = bufio.NewReader(rwc)
 	c.bufw = bufio.NewWriter(rwc)
-	c.streams = make([]*Stream, MaxStreamsNum)
+	c.streams = make([]Stream, MaxStreamsNum)
 	c.chunkPool = &sync.Pool{
 		New: func() interface{} {
 			ck := make([]byte, c.chunkSize)

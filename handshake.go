@@ -223,7 +223,7 @@ func (c *conn) recvChallenge(ckey, skey []byte) error {
 
 	log.Printf("handshake: peer version=%d.%d.%d.%d epoch=%d", c01[8], c01[7], c01[6], c01[5], c.repoch)
 
-	if uint32(c01[5:9]) == 0 {
+	if binary.BigEndian.Uint32(c01[5:9]) == 0 {
 		return nil
 	}
 

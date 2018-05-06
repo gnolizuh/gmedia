@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"log"
 )
 
 const (
@@ -36,9 +37,30 @@ type Header struct {
 	msid      uint32
 }
 
+// RTMP message.
+type Message struct {
+	hdr    *Header
+	chunks []*[]byte
+}
+
+func newMessage(hdr *Header) *Message {
+	msg := Message {
+		hdr: hdr,
+		chunks: make([]*[]byte, 4),
+	}
+
+	return &msg
+}
+
+func (m *Message) append(ch *[]byte) {
+	m.chunks = append(m.chunks, ch)
+}
+
+// RTMP message stream.
 type Stream struct {
 	hdr Header
-	// TODO: define and use chunk array.
+	msg *Message
+	len uint32
 }
 
 // to prevent GC.
@@ -53,7 +75,6 @@ type connState int
 
 // A conn represents the server side of an RTMP connection.
 type conn struct {
-	server     *Server
 	state      connState
 	lepoch     uint32
 	repoch     uint32
@@ -64,7 +85,7 @@ type conn struct {
 	bufw       *bufio.Writer
 
 	// stream message
-	streams    []*Stream
+	streams    []Stream
 
 	// chunk message
 	chunkSize  uint32
@@ -78,13 +99,18 @@ func (c *conn) serve() {
 		return
 	}
 
-	/* for {
-		go c.Loop()
-	} */
+	for {
+		err := c.readMessage()
+		if err != nil {
+			log.Panic(err)
+			return
+		}
+	}
 }
 
 func (c *conn) SetChunkSize(chunkSize uint32) {
 	if c.chunkSize != chunkSize {
+		c.chunkSize = chunkSize
 		c.chunkPool = &sync.Pool{
 			New: func() interface{} {
 				ck := make([]byte, chunkSize)
@@ -94,11 +120,15 @@ func (c *conn) SetChunkSize(chunkSize uint32) {
 	}
 }
 
+func (c *conn) getChunkSize() uint32 {
+	return c.chunkSize
+}
+
 func (c *conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
-	off := 0
+	off := uint32(0)
 	_, err := io.ReadFull(c.bufr, b[off:off+1])
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	/*
@@ -150,34 +180,6 @@ func (c *conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 		off += 2
 	}
 
-	if hdr.fmt <= 2 {
-		_, err := io.ReadFull(c.bufr, b[off:off+4])
-		if err != nil {
-			return 0, err
-		}
-
-		hdr.timestamp = binary.BigEndian.Uint32(b[off:off+4])
-		off += 4
-		if hdr.fmt <= 1 {
-			_, err := io.ReadFull(c.bufr, b[off:off+4])
-			if err != nil {
-				return 0, err
-			}
-
-			hdr.mlen = binary.BigEndian.Uint32(b[off:off+4])
-			off += 4
-			if hdr.fmt == 0 {
-				_, err := io.ReadFull(c.bufr, b[off:off+4])
-				if err != nil {
-					return err
-				}
-
-				hdr.msid = binary.BigEndian.Uint32(b[off:off+4])
-				off += 4
-			}
-		}
-	}
-
 	return off, nil
 }
 
@@ -191,7 +193,7 @@ func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 	// |           message stream id (cont)            |
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	off := 0
+	off := uint32(0)
 	if hdr.fmt <= 2 {
 		_, err := io.ReadFull(c.bufr, b[off:off+3])
 		if err != nil {
@@ -233,7 +235,11 @@ func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	return off, nil
 }
 
-func (c *conn) ReadMessage() error {
+func min(n, m uint32) uint32 {
+	if n < m { return n } else { return m }
+}
+
+func (c *conn) readMessage() error {
 	hdr := Header{}
 	b := headerPool.Get().(*[]byte)
 	p := *b
@@ -243,20 +249,57 @@ func (c *conn) ReadMessage() error {
 	if err != nil {
 		return err
 	}
+	p = p[n:]
 
 	if hdr.csid > MaxStreamsNum {
 		return errors.New(fmt.Sprintf("RTMP in chunk stream too big: %d >= %d", hdr.csid, MaxStreamsNum))
 	}
 
 	// read chunk message header.
-	p = p[n:]
-	n, err = c.readChunkMessageHeader(p, &hdr)
+	_, err = c.readChunkMessageHeader(p, &hdr)
 	if err != nil {
 		return err
 	}
 
-	// TODO: read total message.
-	// c.readMessage()
+	// indicate timestamp whether is absolute or relate.
+	stm := c.streams[hdr.csid]
+	if hdr.fmt > 0 {
+		stm.hdr.timestamp += hdr.timestamp
+	} else {
+		stm.hdr.timestamp = hdr.timestamp
+	}
 
+	// copy temp header to chunk stream header.
+	stm.hdr.fmt = hdr.fmt
+	stm.hdr.csid = hdr.csid
+	if hdr.fmt <= 1 {
+		stm.hdr.mlen = hdr.mlen
+		stm.hdr.typo = hdr.typo
+		if hdr.fmt == 0 {
+			stm.hdr.msid = hdr.msid
+		}
+	}
+
+	n = min(stm.hdr.mlen - stm.len, c.getChunkSize())
+	ch := c.chunkPool.Get().(*[]byte)
+
+	// read message body.
+	_, err = io.ReadFull(c.bufr, (*ch)[:n])
+	if err != nil {
+		return err
+	}
+
+	if stm.msg == nil {
+		stm.msg = newMessage(&stm.hdr)
+	}
+
+	stm.msg.append(ch)
+	stm.len += n
+
+	if stm.hdr.mlen == stm.len {
+		// return handle(stm.msg)
+	}
+
+	// read continue.
 	return nil
 }
