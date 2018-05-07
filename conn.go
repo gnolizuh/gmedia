@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 )
 
 const (
@@ -28,6 +29,7 @@ const (
 	MaxStreamsNum = 32
 )
 
+// Header declare.
 type Header struct {
 	fmt       uint8
 	csid      uint32
@@ -37,7 +39,15 @@ type Header struct {
 	msid      uint32
 }
 
-// RTMP message.
+// to prevent GC.
+var headerPool = sync.Pool{
+	New: func() interface{} {
+		hd := make([]byte, MaxHeaderSize)
+		return &hd
+	},
+}
+
+// RTMP message declare.
 type Message struct {
 	hdr    *Header
 	chunks []*[]byte
@@ -56,33 +66,28 @@ func (m *Message) append(ch *[]byte) {
 	m.chunks = append(m.chunks, ch)
 }
 
-// RTMP message stream.
+// RTMP stream declare.
 type Stream struct {
 	hdr Header
 	msg *Message
 	len uint32
 }
 
-// to prevent GC.
-var headerPool = sync.Pool{
-	New: func() interface{} {
-		hd := make([]byte, MaxHeaderSize)
-		return &hd
-	},
-}
+// The Conn type represents a RTMP connection.
+type Conn struct {
+	conn       net.Conn
 
-type connState int
+	// Connection incoming time(microsecond) and incoming time from remote peer.
+	epoch         uint32
+	incomingEpoch uint32
 
-// A conn represents the server side of an RTMP connection.
-type conn struct {
-	state      connState
-	lepoch     uint32
-	repoch     uint32
+	// State and digest be used in RTMP handshake.
+	state      int
 	digest     []byte
-	rwc        net.Conn
-	remoteAddr string
-	bufr       *bufio.Reader
-	bufw       *bufio.Writer
+
+	// Read and write buffer.
+	bufReader  *bufio.Reader
+	bufWriter  *bufio.Writer
 
 	// stream message
 	streams    []Stream
@@ -92,8 +97,32 @@ type conn struct {
 	chunkPool  *sync.Pool
 }
 
+// Create new connection from conn.
+func newConn(conn net.Conn) *Conn {
+	c := &Conn{
+		conn:          conn,
+		chunkSize:     DefaultChunkSize,
+		state:         StateServerRecvChallenge,
+	}
+
+	c.epoch = uint32(time.Now().UnixNano() / 1000)
+
+	c.bufReader = bufio.NewReader(conn)
+	c.bufWriter = bufio.NewWriter(conn)
+
+	c.streams = make([]Stream, MaxStreamsNum)
+	c.chunkPool = &sync.Pool{
+		New: func() interface{} {
+			ck := make([]byte, c.chunkSize)
+			return &ck
+		},
+	}
+
+	return c
+}
+
 // Serve a new connection.
-func (c *conn) serve() {
+func (c *Conn) serve() {
 	err := c.handshake()
 	if err != nil {
 		return
@@ -108,7 +137,7 @@ func (c *conn) serve() {
 	}
 }
 
-func (c *conn) SetChunkSize(chunkSize uint32) {
+func (c *Conn) SetChunkSize(chunkSize uint32) {
 	if c.chunkSize != chunkSize {
 		c.chunkSize = chunkSize
 		c.chunkPool = &sync.Pool{
@@ -120,13 +149,13 @@ func (c *conn) SetChunkSize(chunkSize uint32) {
 	}
 }
 
-func (c *conn) getChunkSize() uint32 {
+func (c *Conn) getChunkSize() uint32 {
 	return c.chunkSize
 }
 
-func (c *conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
+func (c *Conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 	off := uint32(0)
-	_, err := io.ReadFull(c.bufr, b[off:off+1])
+	_, err := io.ReadFull(c.bufReader, b[off:off+1])
 	if err != nil {
 		return 0, err
 	}
@@ -154,7 +183,7 @@ func (c *conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		 */
 		hdr.csid = 64
-		_, err := io.ReadFull(c.bufr, b[off:off+1])
+		_, err := io.ReadFull(c.bufReader, b[off:off+1])
 		if err != nil {
 			return 0, err
 		}
@@ -171,7 +200,7 @@ func (c *conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		 */
 		hdr.csid = 64
-		_, err := io.ReadFull(c.bufr, b[off:off+2])
+		_, err := io.ReadFull(c.bufReader, b[off:off+2])
 		if err != nil {
 			return 0, err
 		}
@@ -183,7 +212,7 @@ func (c *conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 	return off, nil
 }
 
-func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
+func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	//  0                   1                   2                   3
 	//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -195,7 +224,7 @@ func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 	off := uint32(0)
 	if hdr.fmt <= 2 {
-		_, err := io.ReadFull(c.bufr, b[off:off+3])
+		_, err := io.ReadFull(c.bufReader, b[off:off+3])
 		if err != nil {
 			return 0, err
 		}
@@ -203,7 +232,7 @@ func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 		off += 3
 
 		if hdr.fmt <= 1 {
-			_, err := io.ReadFull(c.bufr, b[off:off+4])
+			_, err := io.ReadFull(c.bufReader, b[off:off+4])
 			if err != nil {
 				return 0, err
 			}
@@ -213,7 +242,7 @@ func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 			off += 1
 
 			if hdr.fmt == 0 {
-				_, err := io.ReadFull(c.bufr, b[off:off+4])
+				_, err := io.ReadFull(c.bufReader, b[off:off+4])
 				if err != nil {
 					return 0, err
 				}
@@ -224,7 +253,7 @@ func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	}
 
 	if hdr.timestamp == 0x00ffffff {
-		_, err := io.ReadFull(c.bufr, b[off:off+4])
+		_, err := io.ReadFull(c.bufReader, b[off:off+4])
 		if err != nil {
 			return 0, err
 		}
@@ -239,7 +268,7 @@ func min(n, m uint32) uint32 {
 	if n < m { return n } else { return m }
 }
 
-func (c *conn) readMessage() error {
+func (c *Conn) readMessage() error {
 	hdr := Header{}
 	b := headerPool.Get().(*[]byte)
 	p := *b
@@ -284,7 +313,7 @@ func (c *conn) readMessage() error {
 	ch := c.chunkPool.Get().(*[]byte)
 
 	// read message body.
-	_, err = io.ReadFull(c.bufr, (*ch)[:n])
+	_, err = io.ReadFull(c.bufReader, (*ch)[:n])
 	if err != nil {
 		return err
 	}

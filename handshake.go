@@ -72,7 +72,7 @@ var (
 )
 
 const (
-	StateServerRecvChallenge connState = iota
+	StateServerRecvChallenge int = iota
 	StateServerSendChallenge
 	StateServerRecvResponse
 	StateServerSendResponse
@@ -144,7 +144,7 @@ func makeRandom(p []byte) {
 	}
 }
 
-func (c *conn) handshake() error {
+func (c *Conn) handshake() error {
 	var err error
 	run := true
 	for run {
@@ -182,14 +182,14 @@ func (c *conn) handshake() error {
 }
 
 // send S0 + S1
-func (c *conn) sendChallenge(version, key []byte) error {
+func (c *Conn) sendChallenge(version, key []byte) error {
 	s01 := make([]byte, HandshakeChallengeSize)
 
 	// s0, version MUST be 0x03
 	s01[0] = ProtoVersion
 
 	// s1
-	binary.BigEndian.PutUint32(s01[1:5], c.lepoch) // timestamp
+	binary.BigEndian.PutUint32(s01[1:5], c.epoch) // timestamp
 	copy(s01[5:9], version)                        // version(zero)
 
 	makeRandom(s01[9:])                            // random
@@ -198,18 +198,18 @@ func (c *conn) sendChallenge(version, key []byte) error {
 		return err
 	}
 
-	_, err = c.bufw.Write(s01)
+	_, err = c.bufWriter.Write(s01)
 	if err != nil {
 		return err
 	}
 
-	return c.bufw.Flush()
+	return c.bufWriter.Flush()
 }
 
 // recv C0 + C1
-func (c *conn) recvChallenge(ckey, skey []byte) error {
+func (c *Conn) recvChallenge(ckey, skey []byte) error {
 	c01 := make([]byte, HandshakeChallengeSize)
-	if _, err := io.ReadFull(c.bufr, c01); err != nil {
+	if _, err := io.ReadFull(c.bufReader, c01); err != nil {
 		return err
 	}
 
@@ -219,9 +219,9 @@ func (c *conn) recvChallenge(ckey, skey []byte) error {
 	}
 
 	// c1
-	c.repoch = binary.BigEndian.Uint32(c01[1:5]) // timestamp
+	c.incomingEpoch = binary.BigEndian.Uint32(c01[1:5]) // timestamp
 
-	log.Printf("handshake: peer version=%d.%d.%d.%d epoch=%d", c01[8], c01[7], c01[6], c01[5], c.repoch)
+	log.Printf("handshake: peer version=%d.%d.%d.%d epoch=%d", c01[8], c01[7], c01[6], c01[5], c.incomingEpoch)
 
 	if binary.BigEndian.Uint32(c01[5:9]) == 0 {
 		return nil
@@ -246,7 +246,7 @@ func (c *conn) recvChallenge(ckey, skey []byte) error {
 }
 
 // send S2
-func (c *conn) sendResponse() error {
+func (c *Conn) sendResponse() error {
 	s2 := make([]byte, HandshakeResponseSize)
 
 	// s2
@@ -262,19 +262,19 @@ func (c *conn) sendResponse() error {
 		s2[offs + uint32(n)] = h
 	}
 
-	_, err = c.bufw.Write(s2)
+	_, err = c.bufWriter.Write(s2)
 	if err != nil {
 		return err
 	}
 
-	return c.bufw.Flush()
+	return c.bufWriter.Flush()
 }
 
 // recv C2
-func (c *conn) recvResponse() error {
+func (c *Conn) recvResponse() error {
 	// c2
 	c2 := make([]byte, HandshakeResponseSize)
-	if _, err := io.ReadFull(c.bufr, c2); err != nil {
+	if _, err := io.ReadFull(c.bufReader, c2); err != nil {
 		return err
 	}
 
