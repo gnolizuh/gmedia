@@ -47,25 +47,6 @@ var headerPool = sync.Pool{
 	},
 }
 
-// RTMP message declare.
-type Message struct {
-	hdr    *Header
-	chunks []*[]byte
-}
-
-func newMessage(hdr *Header) *Message {
-	msg := Message {
-		hdr: hdr,
-		chunks: make([]*[]byte, 4),
-	}
-
-	return &msg
-}
-
-func (m *Message) append(ch *[]byte) {
-	m.chunks = append(m.chunks, ch)
-}
-
 // RTMP stream declare.
 type Stream struct {
 	hdr Header
@@ -95,6 +76,9 @@ type Conn struct {
 	// chunk message
 	chunkSize  uint32
 	chunkPool  *sync.Pool
+
+	// message callback function.
+	msgReader  MessageReader
 }
 
 // Create new connection from conn.
@@ -270,8 +254,13 @@ func min(n, m uint32) uint32 {
 
 func (c *Conn) readMessage() error {
 	hdr := Header{}
+
+	// alloc shared buffer.
 	b := headerPool.Get().(*[]byte)
 	p := *b
+
+	// recycle shared buffer.
+	defer headerPool.Put(b)
 
 	// read basic header.
 	n, err := c.readBasicHeader(p, &hdr)
@@ -322,11 +311,13 @@ func (c *Conn) readMessage() error {
 		stm.msg = newMessage(&stm.hdr)
 	}
 
-	stm.msg.append(ch)
+	stm.msg.appendChunk(ch)
 	stm.len += n
 
 	if stm.hdr.mlen == stm.len {
-		// return handle(stm.msg)
+		if c.msgReader != nil {
+			return c.msgReader.readMessage(c, stm.msg)
+		}
 	}
 
 	// read continue.

@@ -46,9 +46,17 @@ func (srv *Server) Serve(l net.Listener) error {
 		if e != nil {
 			return e
 		}
+
 		c := newConn(rw)
+		c.msgReader = srv // reg message reader.
+
 		go c.serve()
 	}
+}
+
+func (srv *Server) readMessage(c *Conn, msg *Message) error {
+	// message callback.
+	return nil
 }
 
 type tcpKeepAliveListener struct {
