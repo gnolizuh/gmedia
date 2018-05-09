@@ -54,6 +54,10 @@ type Stream struct {
 	len uint32
 }
 
+func min(n, m uint32) uint32 {
+	if n < m { return n } else { return m }
+}
+
 // The Conn type represents a RTMP connection.
 type Conn struct {
 	conn       net.Conn
@@ -86,7 +90,6 @@ func newConn(conn net.Conn) *Conn {
 	c := &Conn{
 		conn:          conn,
 		chunkSize:     DefaultChunkSize,
-		state:         StateServerRecvChallenge,
 	}
 
 	c.epoch = uint32(time.Now().UnixNano() / 1000)
@@ -248,10 +251,6 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	return off, nil
 }
 
-func min(n, m uint32) uint32 {
-	if n < m { return n } else { return m }
-}
-
 func (c *Conn) readMessage() error {
 	hdr := Header{}
 
@@ -316,10 +315,13 @@ func (c *Conn) readMessage() error {
 
 	if stm.hdr.mlen == stm.len {
 		if c.msgReader != nil {
-			return c.msgReader.readMessage(c, stm.msg)
+			return c.parseMessage(stm.msg)
 		}
 	}
 
-	// read continue.
+	return nil
+}
+
+func (c *Conn) parseMessage(msg *Message) error {
 	return nil
 }

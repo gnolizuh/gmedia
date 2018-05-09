@@ -1,7 +1,9 @@
 package rtmp
 
+type MessageType int
+
 const (
-	MessageSetChunkSize = iota + 1  // 1
+	MessageSetChunkSize MessageType = iota + 1     // 1
 	MessageAbort
 	MessageAck
 	MessageUserControl
@@ -10,18 +12,34 @@ const (
 	MessageEdge
 	MessageAudio
 	MessageVideo
-	MessageAmf3Meta = iota + 6      // 15
+)
+
+const (
+	MessageAmf3Meta = iota + MessageVideo + 6      // 15
 	MessageAmf3Shared
 	MessageAmf3Cmd
-	MessageAmfMeta
-	MessageAmfShared
-	MessageAmfCmd
-	MessageAggregate = iota + 1     // 22
+	MessageAmf0Meta
+	MessageAmf0Shared
+	MessageAmf0Cmd
+)
+
+const (
+	MessageAggregate = iota + MessageAmf0Cmd + 2   // 22
 	MessageMax
 )
 
 type MessageReader interface {
-	readMessage(*Conn, *Message) error
+	OnSetChunkSize() error
+	OnAbort() error
+	OnAck() error
+	OnUserControl() error
+	OnWinAckSize() error
+	OnSetPeerBandwidth() error
+	OnEdge() error
+	OnAudio() error
+	OnVideo() error
+	OnAmf() error
+	OnAggregate() error
 }
 
 // RTMP message declare.

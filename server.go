@@ -48,7 +48,10 @@ func (srv *Server) Serve(l net.Listener) error {
 		}
 
 		c := newConn(rw)
-		c.msgReader = srv // reg message reader.
+
+		// Register message reader and set connection state.
+		c.msgReader = srv
+		c.state = StateServerRecvChallenge
 
 		go c.serve()
 	}
@@ -56,6 +59,50 @@ func (srv *Server) Serve(l net.Listener) error {
 
 func (srv *Server) readMessage(c *Conn, msg *Message) error {
 	// message callback.
+	return nil
+}
+
+func (srv *Server) OnSetChunkSize() error {
+	return nil
+}
+
+func (srv *Server) OnAbort() error {
+	return nil
+}
+
+func (srv *Server) OnAck() error {
+	return nil
+}
+
+func (srv *Server) OnUserControl() error {
+	return nil
+}
+
+func (srv *Server) OnWinAckSize() error {
+	return nil
+}
+
+func (srv *Server) OnSetPeerBandwidth() error {
+	return nil
+}
+
+func (srv *Server) OnEdge() error {
+	return nil
+}
+
+func (srv *Server) OnAudio() error {
+	return nil
+}
+
+func (srv *Server) OnVideo() error {
+	return nil
+}
+
+func (srv *Server) OnAmf() error {
+	return nil
+}
+
+func (srv *Server) OnAggregate() error {
 	return nil
 }
 
