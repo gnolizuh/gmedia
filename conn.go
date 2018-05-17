@@ -29,6 +29,8 @@ const (
 	MaxStreamsNum = 32
 )
 
+type MessageHandler func (*Message) error
+
 // Header declare.
 type Header struct {
 	fmt       uint8
@@ -40,7 +42,7 @@ type Header struct {
 }
 
 // to prevent GC.
-var headerPool = sync.Pool{
+var headerSharedPool = sync.Pool{
 	New: func() interface{} {
 		hd := make([]byte, MaxHeaderSize)
 		return &hd
@@ -52,10 +54,6 @@ type Stream struct {
 	hdr Header
 	msg *Message
 	len uint32
-}
-
-func min(n, m uint32) uint32 {
-	if n < m { return n } else { return m }
 }
 
 // The Conn type represents a RTMP connection.
@@ -83,6 +81,8 @@ type Conn struct {
 
 	// message callback function.
 	msgReader  MessageReader
+
+	handlers   [MessageMax]MessageHandler
 }
 
 // Create new connection from conn.
@@ -100,12 +100,38 @@ func newConn(conn net.Conn) *Conn {
 	c.streams = make([]Stream, MaxStreamsNum)
 	c.chunkPool = &sync.Pool{
 		New: func() interface{} {
-			ck := make([]byte, c.chunkSize)
-			return &ck
+			return &ChunkType{
+				buf: make([]byte, c.chunkSize),
+				off: 0,
+			}
 		},
 	}
 
+	// init callback handler.
+	initHandlers(c)
+
 	return c
+}
+
+func initHandlers(c *Conn) {
+	c.handlers[MessageSetChunkSize] = c.onSetChunkSize
+	c.handlers[MessageAbort] = c.onAbort
+	c.handlers[MessageAck] = c.onAck
+	c.handlers[MessageUserControl] = c.onUserControl
+	c.handlers[MessageWindowAckSize] = c.onWindowAckSize
+	c.handlers[MessageSetPeerBandwidth] = c.onSetPeerBandwidth
+	c.handlers[MessageEdge] = c.onEdge
+	c.handlers[MessageAudio] = c.onAudio
+	c.handlers[MessageVideo] = c.onVideo
+
+	c.handlers[MessageAmf3Meta] = c.onAmf3Meta
+	c.handlers[MessageAmf3Shared] = c.onAmf3Shared
+	c.handlers[MessageAmf3Cmd] = c.onAmf3Cmd
+	c.handlers[MessageAmf0Meta] = c.onAmf0Meta
+	c.handlers[MessageAmf0Shared] = c.onAmf0Shared
+	c.handlers[MessageAmf0Cmd] = c.onAmf0Cmd
+
+	c.handlers[MessageAggregate] = c.onAggregate
 }
 
 // Serve a new connection.
@@ -129,8 +155,10 @@ func (c *Conn) SetChunkSize(chunkSize uint32) {
 		c.chunkSize = chunkSize
 		c.chunkPool = &sync.Pool{
 			New: func() interface{} {
-				ck := make([]byte, chunkSize)
-				return &ck
+				return &ChunkType{
+					buf: make([]byte, c.chunkSize),
+					off: 0,
+				}
 			},
 		}
 	}
@@ -156,7 +184,7 @@ func (c *Conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 	 * |fmt|   cs id   |
 	 * +-+-+-+-+-+-+-+-+
 	 */
-	hdr.fmt = (uint8(b[off] >> 6) & 0x03)
+	hdr.fmt = uint8(b[off] >> 6) & 0x03
 	hdr.csid = uint32(uint8(b[off]) & 0x3f)
 
 	off += 1
@@ -255,11 +283,11 @@ func (c *Conn) readMessage() error {
 	hdr := Header{}
 
 	// alloc shared buffer.
-	b := headerPool.Get().(*[]byte)
+	b := headerSharedPool.Get().(*[]byte)
 	p := *b
 
 	// recycle shared buffer.
-	defer headerPool.Put(b)
+	defer headerSharedPool.Put(b)
 
 	// read basic header.
 	n, err := c.readBasicHeader(p, &hdr)
@@ -298,10 +326,11 @@ func (c *Conn) readMessage() error {
 	}
 
 	n = min(stm.hdr.mlen - stm.len, c.getChunkSize())
-	ch := c.chunkPool.Get().(*[]byte)
+	ch := c.chunkPool.Get().(*ChunkType)
+	// TODO: ch need to free
 
 	// read message body.
-	_, err = io.ReadFull(c.bufReader, (*ch)[:n])
+	_, err = io.ReadFull(c.bufReader, (*ch).buf[:n])
 	if err != nil {
 		return err
 	}
@@ -314,14 +343,110 @@ func (c *Conn) readMessage() error {
 	stm.len += n
 
 	if stm.hdr.mlen == stm.len {
-		if c.msgReader != nil {
-			return c.parseMessage(stm.msg)
+		if h := c.handlers[hdr.typo]; h != nil {
+			return h(stm.msg)
 		}
 	}
 
 	return nil
 }
 
-func (c *Conn) parseMessage(msg *Message) error {
+func (c *Conn) onSetChunkSize(msg *Message) error {
+	buf := make([]byte, 4)
+	_, err := msg.reader.Read(buf)
+	if err != nil {
+		return err
+	}
+
+	cs := binary.BigEndian.Uint32(buf)
+	return c.msgReader.OnSetChunkSize(cs)
+}
+
+func (c *Conn) onAbort(msg *Message) error {
+	buf := make([]byte, 4)
+	_, err := msg.reader.Read(buf)
+	if err != nil {
+		return err
+	}
+
+	csid := binary.BigEndian.Uint32(buf)
+	return c.msgReader.OnAbort(csid)
+}
+
+func (c *Conn) onAck(msg *Message) error {
+	buf := make([]byte, 4)
+	_, err := msg.reader.Read(buf)
+	if err != nil {
+		return err
+	}
+
+	seq := binary.BigEndian.Uint32(buf)
+	return c.msgReader.OnAck(seq)
+}
+
+func (c *Conn) onUserControl(msg *Message) error {
+	return nil
+}
+
+func (c *Conn) onWindowAckSize(msg *Message) error {
+	buf := make([]byte, 4)
+	_, err := msg.reader.Read(buf)
+	if err != nil {
+		return err
+	}
+
+	win := binary.BigEndian.Uint32(buf)
+	return c.msgReader.OnWinAckSize(win)
+}
+
+func (c *Conn) onSetPeerBandwidth(msg *Message) error {
+	buf := make([]byte, 5)
+	_, err := msg.reader.Read(buf)
+	if err != nil {
+		return err
+	}
+
+	bandwidth := binary.BigEndian.Uint32(buf[:4])
+	limit := uint8(buf[4])
+	return c.msgReader.OnSetPeerBandwidth(bandwidth, limit)
+}
+
+func (c *Conn) onEdge(msg *Message) error {
+	return nil
+}
+
+func (c *Conn) onAudio(msg *Message) error {
+	return nil
+}
+
+func (c *Conn) onVideo(msg *Message) error {
+	return nil
+}
+
+func (c *Conn) onAmf3Meta(msg *Message) error {
+	return nil
+}
+
+func (c *Conn) onAmf3Shared(msg *Message) error {
+	return nil
+}
+
+func (c *Conn) onAmf3Cmd(msg *Message) error {
+	return nil
+}
+
+func (c *Conn) onAmf0Meta(msg *Message) error {
+	return nil
+}
+
+func (c *Conn) onAmf0Shared(msg *Message) error {
+	return nil
+}
+
+func (c *Conn) onAmf0Cmd(msg *Message) error {
+	return nil
+}
+
+func (c *Conn) onAggregate(msg *Message) error {
 	return nil
 }

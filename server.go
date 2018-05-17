@@ -62,15 +62,15 @@ func (srv *Server) readMessage(c *Conn, msg *Message) error {
 	return nil
 }
 
-func (srv *Server) OnSetChunkSize() error {
+func (srv *Server) OnSetChunkSize(cs uint32) error {
 	return nil
 }
 
-func (srv *Server) OnAbort() error {
+func (srv *Server) OnAbort(csid uint32) error {
 	return nil
 }
 
-func (srv *Server) OnAck() error {
+func (srv *Server) OnAck(seq uint32) error {
 	return nil
 }
 
@@ -78,11 +78,11 @@ func (srv *Server) OnUserControl() error {
 	return nil
 }
 
-func (srv *Server) OnWinAckSize() error {
+func (srv *Server) OnWinAckSize(win uint32) error {
 	return nil
 }
 
-func (srv *Server) OnSetPeerBandwidth() error {
+func (srv *Server) OnSetPeerBandwidth(bandwidth uint32, limit uint8) error {
 	return nil
 }
 
