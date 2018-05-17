@@ -3,22 +3,17 @@ package rtmp
 import (
 	"net"
 	"time"
+	"bufio"
 )
-
-type Handler interface {
-	ServeRTMP(*Client)
-}
 
 type Server struct {
 	Addr        string
-	Handler     Handler
 	ReadTimeout time.Duration
 }
 
-func ListenAndServe(addr string, handler Handler) error {
+func ListenAndServe(addr string) error {
 	server := &Server{
 		Addr: addr,
-		Handler: handler,
 	}
 
 	return server.ListenAndServe()
@@ -57,11 +52,6 @@ func (srv *Server) Serve(l net.Listener) error {
 	}
 }
 
-func (srv *Server) readMessage(c *Conn, msg *Message) error {
-	// message callback.
-	return nil
-}
-
 func (srv *Server) OnSetChunkSize(cs uint32) error {
 	return nil
 }
@@ -74,7 +64,7 @@ func (srv *Server) OnAck(seq uint32) error {
 	return nil
 }
 
-func (srv *Server) OnUserControl() error {
+func (srv *Server) OnUserControl(event uint16, reader *bufio.Reader) error {
 	return nil
 }
 

@@ -151,6 +151,7 @@ func (c *Conn) serve() {
 }
 
 func (c *Conn) SetChunkSize(chunkSize uint32) {
+	// TODO: move out old chunks to new chunk pool.
 	if c.chunkSize != chunkSize {
 		c.chunkSize = chunkSize
 		c.chunkPool = &sync.Pool{
@@ -351,63 +352,84 @@ func (c *Conn) readMessage() error {
 	return nil
 }
 
-func (c *Conn) onSetChunkSize(msg *Message) error {
+func readUint32(reader *bufio.Reader) (uint32, error) {
 	buf := make([]byte, 4)
-	_, err := msg.reader.Read(buf)
+	_, err := reader.Read(buf)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	cs := binary.BigEndian.Uint32(buf)
-	return c.msgReader.OnSetChunkSize(cs)
+	return binary.BigEndian.Uint32(buf), nil
+}
+
+func readUint16(reader *bufio.Reader) (uint16, error) {
+	buf := make([]byte, 2)
+	_, err := reader.Read(buf)
+	if err != nil {
+		return 0, err
+	}
+
+	return binary.BigEndian.Uint16(buf), nil
+}
+
+func readUint8(reader *bufio.Reader) (uint8, error) {
+	buf, err := reader.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+
+	return uint8(buf), nil
+}
+
+func (c *Conn) onSetChunkSize(msg *Message) error {
+	if cs, err := readUint32(msg.reader); err != nil {
+		return err
+	} else {
+		return c.msgReader.OnSetChunkSize(cs)
+	}
 }
 
 func (c *Conn) onAbort(msg *Message) error {
-	buf := make([]byte, 4)
-	_, err := msg.reader.Read(buf)
-	if err != nil {
+	if csid, err := readUint32(msg.reader); err != nil {
 		return err
+	} else {
+		return c.msgReader.OnAbort(csid)
 	}
-
-	csid := binary.BigEndian.Uint32(buf)
-	return c.msgReader.OnAbort(csid)
 }
 
 func (c *Conn) onAck(msg *Message) error {
-	buf := make([]byte, 4)
-	_, err := msg.reader.Read(buf)
-	if err != nil {
+	if seq, err := readUint32(msg.reader); err != nil {
 		return err
+	} else {
+		return c.msgReader.OnAck(seq)
 	}
-
-	seq := binary.BigEndian.Uint32(buf)
-	return c.msgReader.OnAck(seq)
 }
 
 func (c *Conn) onUserControl(msg *Message) error {
-	return nil
+	if event, err := readUint16(msg.reader); err != nil {
+		return err
+	} else {
+		return c.msgReader.OnUserControl(event, msg.reader)
+	}
 }
 
 func (c *Conn) onWindowAckSize(msg *Message) error {
-	buf := make([]byte, 4)
-	_, err := msg.reader.Read(buf)
-	if err != nil {
+	if win, err := readUint32(msg.reader); err != nil {
 		return err
+	} else {
+		return c.msgReader.OnWinAckSize(win)
 	}
-
-	win := binary.BigEndian.Uint32(buf)
-	return c.msgReader.OnWinAckSize(win)
 }
 
 func (c *Conn) onSetPeerBandwidth(msg *Message) error {
-	buf := make([]byte, 5)
-	_, err := msg.reader.Read(buf)
+	bandwidth, err := readUint32(msg.reader)
 	if err != nil {
 		return err
 	}
-
-	bandwidth := binary.BigEndian.Uint32(buf[:4])
-	limit := uint8(buf[4])
+	limit, err := readUint8(msg.reader)
+	if err != nil {
+		return err
+	}
 	return c.msgReader.OnSetPeerBandwidth(bandwidth, limit)
 }
 

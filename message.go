@@ -37,7 +37,7 @@ type MessageReader interface {
 	OnSetChunkSize(uint32) error
 	OnAbort(uint32) error
 	OnAck(uint32) error
-	OnUserControl() error
+	OnUserControl(uint16, *bufio.Reader) error
 	OnWinAckSize(uint32) error
 	OnSetPeerBandwidth(uint32, uint8) error
 	OnEdge() error
