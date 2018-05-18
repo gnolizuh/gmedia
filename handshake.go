@@ -209,7 +209,7 @@ func (c *Conn) sendChallenge(version, key []byte) error {
 // recv C0 + C1
 func (c *Conn) recvChallenge(ckey, skey []byte) error {
 	c01 := make([]byte, HandshakeChallengeSize)
-	if _, err := io.ReadFull(c.bufReader, c01); err != nil {
+	if err := c.readFull(c01); err != nil {
 		return err
 	}
 
@@ -274,7 +274,7 @@ func (c *Conn) sendResponse() error {
 func (c *Conn) recvResponse() error {
 	// c2
 	c2 := make([]byte, HandshakeResponseSize)
-	if _, err := io.ReadFull(c.bufReader, c2); err != nil {
+	if err := c.readFull(c2); err != nil {
 		return err
 	}
 

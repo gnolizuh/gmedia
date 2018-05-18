@@ -79,6 +79,11 @@ type Conn struct {
 	chunkSize  uint32
 	chunkPool  *sync.Pool
 
+	// ack window size
+	ackWinSize uint32
+	inBytes    uint32
+	inLastAck  uint32
+
 	// message callback function.
 	msgReader  MessageReader
 
@@ -118,7 +123,7 @@ func initHandlers(c *Conn) {
 	c.handlers[MessageAbort] = c.onAbort
 	c.handlers[MessageAck] = c.onAck
 	c.handlers[MessageUserControl] = c.onUserControl
-	c.handlers[MessageWindowAckSize] = c.onWindowAckSize
+	c.handlers[MessageWindowAckSize] = c.onWinAckSize
 	c.handlers[MessageSetPeerBandwidth] = c.onSetPeerBandwidth
 	c.handlers[MessageEdge] = c.onEdge
 	c.handlers[MessageAudio] = c.onAudio
@@ -142,7 +147,7 @@ func (c *Conn) serve() {
 	}
 
 	for {
-		err := c.readMessage()
+		err := c.pumpMessage()
 		if err != nil {
 			log.Panic(err)
 			return
@@ -151,7 +156,6 @@ func (c *Conn) serve() {
 }
 
 func (c *Conn) SetChunkSize(chunkSize uint32) {
-	// TODO: move out old chunks to new chunk pool.
 	if c.chunkSize != chunkSize {
 		c.chunkSize = chunkSize
 		c.chunkPool = &sync.Pool{
@@ -169,9 +173,30 @@ func (c *Conn) getChunkSize() uint32 {
 	return c.chunkSize
 }
 
+func (c *Conn) readFull(buf []byte) error {
+	n, err := io.ReadFull(c.bufReader, buf)
+	if err != nil {
+		return err
+	}
+
+	c.inBytes += uint32(n)
+
+	if c.inBytes >= 0xf0000000 {
+		log.Printf("resetting byte counter")
+		c.inBytes = 0
+		c.inLastAck = 0
+	}
+
+	if c.ackWinSize > 0 && c.inBytes - c.inLastAck >= c.ackWinSize {
+		c.inLastAck = c.inBytes
+
+		// TODO: send ack.
+	}
+}
+
 func (c *Conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 	off := uint32(0)
-	_, err := io.ReadFull(c.bufReader, b[off:off+1])
+	err := c.readFull(b[off:off+1])
 	if err != nil {
 		return 0, err
 	}
@@ -199,7 +224,7 @@ func (c *Conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		 */
 		hdr.csid = 64
-		_, err := io.ReadFull(c.bufReader, b[off:off+1])
+		err := c.readFull(b[off:off+1])
 		if err != nil {
 			return 0, err
 		}
@@ -216,7 +241,7 @@ func (c *Conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		 */
 		hdr.csid = 64
-		_, err := io.ReadFull(c.bufReader, b[off:off+2])
+		err := c.readFull(b[off:off+2])
 		if err != nil {
 			return 0, err
 		}
@@ -240,7 +265,7 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 	off := uint32(0)
 	if hdr.fmt <= 2 {
-		_, err := io.ReadFull(c.bufReader, b[off:off+3])
+		err := c.readFull(b[off:off+3])
 		if err != nil {
 			return 0, err
 		}
@@ -248,7 +273,7 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 		off += 3
 
 		if hdr.fmt <= 1 {
-			_, err := io.ReadFull(c.bufReader, b[off:off+4])
+			err := c.readFull(b[off:off+4])
 			if err != nil {
 				return 0, err
 			}
@@ -258,7 +283,7 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 			off += 1
 
 			if hdr.fmt == 0 {
-				_, err := io.ReadFull(c.bufReader, b[off:off+4])
+				err := c.readFull(b[off:off+4])
 				if err != nil {
 					return 0, err
 				}
@@ -269,7 +294,7 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	}
 
 	if hdr.timestamp == 0x00ffffff {
-		_, err := io.ReadFull(c.bufReader, b[off:off+4])
+		err := c.readFull(b[off:off+4])
 		if err != nil {
 			return 0, err
 		}
@@ -280,7 +305,7 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	return off, nil
 }
 
-func (c *Conn) readMessage() error {
+func (c *Conn) pumpMessage() error {
 	hdr := Header{}
 
 	// alloc shared buffer.
@@ -331,7 +356,7 @@ func (c *Conn) readMessage() error {
 	// TODO: ch need to free
 
 	// read message body.
-	_, err = io.ReadFull(c.bufReader, (*ch).buf[:n])
+	err = c.readFull((*ch).buf[:n])
 	if err != nil {
 		return err
 	}
@@ -382,27 +407,38 @@ func readUint8(reader *bufio.Reader) (uint8, error) {
 }
 
 func (c *Conn) onSetChunkSize(msg *Message) error {
-	if cs, err := readUint32(msg.reader); err != nil {
+	cs, err := readUint32(msg.reader)
+	if err != nil {
 		return err
-	} else {
-		return c.msgReader.OnSetChunkSize(cs)
 	}
+
+	log.Printf("set chunk size, cs: %d", cs)
+
+	c.SetChunkSize(cs)
+
+	return nil
 }
 
 func (c *Conn) onAbort(msg *Message) error {
-	if csid, err := readUint32(msg.reader); err != nil {
+	csid, err := readUint32(msg.reader)
+	if err != nil {
 		return err
-	} else {
-		return c.msgReader.OnAbort(csid)
 	}
+
+	log.Printf("abort, csid: %d", csid)
+
+	return nil
 }
 
 func (c *Conn) onAck(msg *Message) error {
-	if seq, err := readUint32(msg.reader); err != nil {
+	seq, err := readUint32(msg.reader)
+	if err != nil {
 		return err
-	} else {
-		return c.msgReader.OnAck(seq)
 	}
+
+	log.Printf("ack, seq: %d", seq)
+
+	return nil
 }
 
 func (c *Conn) onUserControl(msg *Message) error {
@@ -413,12 +449,17 @@ func (c *Conn) onUserControl(msg *Message) error {
 	}
 }
 
-func (c *Conn) onWindowAckSize(msg *Message) error {
-	if win, err := readUint32(msg.reader); err != nil {
+func (c *Conn) onWinAckSize(msg *Message) error {
+	win, err := readUint32(msg.reader)
+	if err != nil {
 		return err
-	} else {
-		return c.msgReader.OnWinAckSize(win)
 	}
+
+	log.Printf("ack window size, win: %d", win)
+
+	c.ackWinSize = win
+
+	return nil
 }
 
 func (c *Conn) onSetPeerBandwidth(msg *Message) error {
@@ -426,11 +467,15 @@ func (c *Conn) onSetPeerBandwidth(msg *Message) error {
 	if err != nil {
 		return err
 	}
+
 	limit, err := readUint8(msg.reader)
 	if err != nil {
 		return err
 	}
-	return c.msgReader.OnSetPeerBandwidth(bandwidth, limit)
+
+	log.Printf("set peer bandwidth, bandwidth: %d, limit: %d", bandwidth, limit)
+
+	return nil
 }
 
 func (c *Conn) onEdge(msg *Message) error {

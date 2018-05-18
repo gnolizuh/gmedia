@@ -52,27 +52,7 @@ func (srv *Server) Serve(l net.Listener) error {
 	}
 }
 
-func (srv *Server) OnSetChunkSize(cs uint32) error {
-	return nil
-}
-
-func (srv *Server) OnAbort(csid uint32) error {
-	return nil
-}
-
-func (srv *Server) OnAck(seq uint32) error {
-	return nil
-}
-
 func (srv *Server) OnUserControl(event uint16, reader *bufio.Reader) error {
-	return nil
-}
-
-func (srv *Server) OnWinAckSize(win uint32) error {
-	return nil
-}
-
-func (srv *Server) OnSetPeerBandwidth(bandwidth uint32, limit uint8) error {
 	return nil
 }
 
