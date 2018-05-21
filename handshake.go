@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"math/rand"
 	"encoding/binary"
-	"io"
 	"log"
 	"errors"
 	"fmt"

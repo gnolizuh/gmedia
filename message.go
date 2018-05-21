@@ -33,6 +33,18 @@ const (
 	MessageMax
 )
 
+const (
+	UserMessageStreamBegin = iota                  // 0
+	UserMessageStreamEOF
+	UserMessageStreamDry
+	UserMessageStreamSetBufLen
+	UserMessageStreamIsRecorded
+	UserMessageUnknown
+	UserMessagePingRequest
+	UserMessagePingResponse
+	UserMessageMax
+)
+
 type MessageReader interface {
 	OnUserControl(uint16, *bufio.Reader) error
 	OnEdge() error

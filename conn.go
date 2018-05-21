@@ -31,6 +31,8 @@ const (
 
 type MessageHandler func (*Message) error
 
+type UserMessageHandler func (*bufio.Reader) error
+
 // Header declare.
 type Header struct {
 	fmt       uint8
@@ -86,8 +88,7 @@ type Conn struct {
 
 	// message callback function.
 	msgReader  MessageReader
-
-	handlers   [MessageMax]MessageHandler
+	handler    Handler
 }
 
 // Create new connection from conn.
@@ -112,31 +113,7 @@ func newConn(conn net.Conn) *Conn {
 		},
 	}
 
-	// init callback handler.
-	initHandlers(c)
-
 	return c
-}
-
-func initHandlers(c *Conn) {
-	c.handlers[MessageSetChunkSize] = c.onSetChunkSize
-	c.handlers[MessageAbort] = c.onAbort
-	c.handlers[MessageAck] = c.onAck
-	c.handlers[MessageUserControl] = c.onUserControl
-	c.handlers[MessageWindowAckSize] = c.onWinAckSize
-	c.handlers[MessageSetPeerBandwidth] = c.onSetPeerBandwidth
-	c.handlers[MessageEdge] = c.onEdge
-	c.handlers[MessageAudio] = c.onAudio
-	c.handlers[MessageVideo] = c.onVideo
-
-	c.handlers[MessageAmf3Meta] = c.onAmf3Meta
-	c.handlers[MessageAmf3Shared] = c.onAmf3Shared
-	c.handlers[MessageAmf3Cmd] = c.onAmf3Cmd
-	c.handlers[MessageAmf0Meta] = c.onAmf0Meta
-	c.handlers[MessageAmf0Shared] = c.onAmf0Shared
-	c.handlers[MessageAmf0Cmd] = c.onAmf0Cmd
-
-	c.handlers[MessageAggregate] = c.onAggregate
 }
 
 // Serve a new connection.
@@ -192,6 +169,8 @@ func (c *Conn) readFull(buf []byte) error {
 
 		// TODO: send ack.
 	}
+
+	return nil
 }
 
 func (c *Conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
@@ -369,151 +348,12 @@ func (c *Conn) pumpMessage() error {
 	stm.len += n
 
 	if stm.hdr.mlen == stm.len {
-		if h := c.handlers[hdr.typo]; h != nil {
-			return h(stm.msg)
+		if hdr.typo >= uint8(MessageMax) {
+			return errors.New(fmt.Sprintf("unexpected RTMP message type: %d", hdr.typo))
 		}
+
+		return c.handler.Handle(&stm)
 	}
 
-	return nil
-}
-
-func readUint32(reader *bufio.Reader) (uint32, error) {
-	buf := make([]byte, 4)
-	_, err := reader.Read(buf)
-	if err != nil {
-		return 0, err
-	}
-
-	return binary.BigEndian.Uint32(buf), nil
-}
-
-func readUint16(reader *bufio.Reader) (uint16, error) {
-	buf := make([]byte, 2)
-	_, err := reader.Read(buf)
-	if err != nil {
-		return 0, err
-	}
-
-	return binary.BigEndian.Uint16(buf), nil
-}
-
-func readUint8(reader *bufio.Reader) (uint8, error) {
-	buf, err := reader.ReadByte()
-	if err != nil {
-		return 0, err
-	}
-
-	return uint8(buf), nil
-}
-
-func (c *Conn) onSetChunkSize(msg *Message) error {
-	cs, err := readUint32(msg.reader)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("set chunk size, cs: %d", cs)
-
-	c.SetChunkSize(cs)
-
-	return nil
-}
-
-func (c *Conn) onAbort(msg *Message) error {
-	csid, err := readUint32(msg.reader)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("abort, csid: %d", csid)
-
-	return nil
-}
-
-func (c *Conn) onAck(msg *Message) error {
-	seq, err := readUint32(msg.reader)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("ack, seq: %d", seq)
-
-	return nil
-}
-
-func (c *Conn) onUserControl(msg *Message) error {
-	if event, err := readUint16(msg.reader); err != nil {
-		return err
-	} else {
-		return c.msgReader.OnUserControl(event, msg.reader)
-	}
-}
-
-func (c *Conn) onWinAckSize(msg *Message) error {
-	win, err := readUint32(msg.reader)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("ack window size, win: %d", win)
-
-	c.ackWinSize = win
-
-	return nil
-}
-
-func (c *Conn) onSetPeerBandwidth(msg *Message) error {
-	bandwidth, err := readUint32(msg.reader)
-	if err != nil {
-		return err
-	}
-
-	limit, err := readUint8(msg.reader)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("set peer bandwidth, bandwidth: %d, limit: %d", bandwidth, limit)
-
-	return nil
-}
-
-func (c *Conn) onEdge(msg *Message) error {
-	return nil
-}
-
-func (c *Conn) onAudio(msg *Message) error {
-	return nil
-}
-
-func (c *Conn) onVideo(msg *Message) error {
-	return nil
-}
-
-func (c *Conn) onAmf3Meta(msg *Message) error {
-	return nil
-}
-
-func (c *Conn) onAmf3Shared(msg *Message) error {
-	return nil
-}
-
-func (c *Conn) onAmf3Cmd(msg *Message) error {
-	return nil
-}
-
-func (c *Conn) onAmf0Meta(msg *Message) error {
-	return nil
-}
-
-func (c *Conn) onAmf0Shared(msg *Message) error {
-	return nil
-}
-
-func (c *Conn) onAmf0Cmd(msg *Message) error {
-	return nil
-}
-
-func (c *Conn) onAggregate(msg *Message) error {
 	return nil
 }
