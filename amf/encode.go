@@ -9,6 +9,7 @@ import (
 
 type encodeState struct {
 	bytes.Buffer
+	cache        map[string]int
 	scratch      [64]byte
 }
 
@@ -30,6 +31,53 @@ func (e *encodeState) encode(v interface{}) (err error) {
 
 func (e *encodeState) reflectValue(v reflect.Value) {
 	valueEncoder(v)(e, v)
+}
+
+func (e *encodeState) u29(u uint32) {
+	b := make([]byte, 0, 4)
+
+	switch {
+	case u < 0x80:
+		b = append(b, byte(u))
+	case u < 0x4000:
+		b = append(b, byte((u>>7)|0x80))
+		b = append(b, byte(u&0x7f))
+	case u < 0x200000:
+		b = append(b, byte((u>>14)|0x80))
+		b = append(b, byte((u>>7)|0x80))
+		b = append(b, byte(u&0x7f))
+	case u < 0x20000000:
+		b = append(b, byte((u>>22)|0x80))
+		b = append(b, byte((u>>15)|0x80))
+		b = append(b, byte((u>>7)|0x80))
+		b = append(b, byte(u&0xff))
+	}
+
+	e.Write(b)
+}
+
+func (e *encodeState) marker(m byte) {
+	e.WriteByte(m)
+}
+
+func (e *encodeState) string(s string) {
+	i, ok := e.cache[s]
+	if ok {
+		e.u29(uint32(i << 1))
+		return
+	}
+
+	e.u29(uint32((len(s) << 1) | 0x01))
+
+	if s != "" {
+		e.cache[s] = len(e.cache)
+	}
+
+	e.WriteString(s)
+}
+
+func (e *encodeState) null() {
+	e.WriteByte(AMFNull)
 }
 
 type encoderFunc func(e *encodeState, v reflect.Value)
@@ -58,13 +106,13 @@ func typeEncoder(t reflect.Type) encoderFunc {
 		return fi.(encoderFunc)
 	}
 
-	f = newTypeEncoder(t, true)
+	f = newTypeEncoder(t)
 	wg.Done()
 	encoderCache.Store(t, f)
 	return f
 }
 
-func newTypeEncoder(t reflect.Type, allowAddr bool) encoderFunc {
+func newTypeEncoder(t reflect.Type) encoderFunc {
 	switch t.Kind() {
 	case reflect.String:
 		return stringEncoder
@@ -93,22 +141,41 @@ func newTypeEncoder(t reflect.Type, allowAddr bool) encoderFunc {
 	}
 }
 
+func stringEncoder(e *encodeState, v reflect.Value) {
+	e.marker(AMFString)
+	e.string(v.String())
+}
+
 func boolEncoder(e *encodeState, v reflect.Value) {
+	e.marker(AMFBoolean)
+	if v.Bool() {
+		e.WriteByte(1)
+	} else {
+		e.WriteByte(0)
+	}
 }
 
 func intEncoder(e *encodeState, v reflect.Value) {
+	e.marker(AMFNumber)
+	e.u29(uint32(v.Int()))
 }
 
 func uintEncoder(e *encodeState, v reflect.Value) {
-}
-
-func stringEncoder(e *encodeState, v reflect.Value) {
+	e.marker(AMFNumber)
+	e.u29(uint32(v.Uint()))
 }
 
 func floatEncoder(e *encodeState, v reflect.Value) {
+	e.marker(AMFNumber)
+	e.u29(uint32(v.Float()))
 }
 
 func interfaceEncoder(e *encodeState, v reflect.Value) {
+	if v.IsNil() {
+		e.null()
+		return
+	}
+	e.reflectValue(v.Elem())
 }
 
 func newStructEncoder(t reflect.Type) encoderFunc {
