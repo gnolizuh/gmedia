@@ -60,6 +60,14 @@ func (e *encodeState) marker(m byte) {
 	e.WriteByte(m)
 }
 
+func (e *encodeState) bool(b bool) {
+	if b {
+		e.WriteByte(1)
+	} else {
+		e.WriteByte(0)
+	}
+}
+
 func (e *encodeState) string(s string) {
 	i, ok := e.cache[s]
 	if ok {
@@ -148,11 +156,7 @@ func stringEncoder(e *encodeState, v reflect.Value) {
 
 func boolEncoder(e *encodeState, v reflect.Value) {
 	e.marker(AMFBoolean)
-	if v.Bool() {
-		e.WriteByte(1)
-	} else {
-		e.WriteByte(0)
-	}
+	e.bool(v.Bool())
 }
 
 func intEncoder(e *encodeState, v reflect.Value) {
