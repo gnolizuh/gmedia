@@ -357,7 +357,6 @@ func (ae *arrayEncoder) encode(e *encodeState, v reflect.Value) {
 		e.encodeObjectName(strconv.Itoa(i))
 		ae.elemEnc(e, v.Index(i))
 	}
-	e.WriteByte(']')
 }
 
 func newArrayEncoder(t reflect.Type) encoderFunc {
