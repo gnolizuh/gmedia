@@ -1,13 +1,25 @@
 package amf
 
 const (
-	AMFNumber      = 0x00
-	AMFBoolean     = 0x01
-	AMFString      = 0x02
-	AMFObject      = 0x03
-	AMFNull        = 0x05
-	AMFArrayNull   = 0x06
-	AMFECMAArray   = 0x08
-	AMFObjectEnd   = 0x09
-	AMFStrictArray = 0x0a
+	NumberMarker      = 0x00
+	BooleanMarker     = 0x01
+	StringMarker      = 0x02
+	ObjectMarker      = 0x03
+	MovieClipMarker   = 0x04
+	NullMarker        = 0x05
+	ArrayNullMarker   = 0x06
+	ReferenceMarker   = 0x07
+	ECMAArrayMarker   = 0x08
+	ObjectEndMarker   = 0x09
+	StrictArrayMarker = 0x0a
+	DateMarker        = 0x0b
+	LongStringMarker  = 0x0c
+	UnsupportedMarker = 0x0d
+	RecordSetMarker   = 0x0e
+	XMLDocumentMarker = 0x0f
+	TypedObjectMarker = 0x10
+)
+
+const (
+	LongStringSize = 0xffff
 )
