@@ -82,19 +82,16 @@ func (w *reflectWithString) resolve() error {
 	panic("unexpected map key type")
 }
 
-func (e *encodeState) encodeString(s string) {
+func (e *encodeState) encodeString(s string, marker bool) {
 	l := len(s)
-	if l > 0 {
-		if l > LongStringSize {
-			e.encodeMarker(LongStringMarker)
-			e.encodeUint(uint32(l))
-		} else {
-			e.encodeMarker(StringMarker)
-			e.encodeUint(uint16(l))
-		}
-
-		e.Write([]byte(s))
+	if l > LongStringSize {
+		if marker { e.encodeMarker(LongStringMarker) }
+		e.encodeUint(uint32(l))
+	} else {
+		if marker { e.encodeMarker(StringMarker) }
+		e.encodeUint(uint16(l))
 	}
+	e.Write([]byte(s))
 }
 
 func (e *encodeState) encodeUint(u interface{}) {
@@ -168,11 +165,11 @@ func newTypeEncoder(t reflect.Type) encoderFunc {
 		return floatEncoder
 	case reflect.Interface:
 		return interfaceEncoder
-	case reflect.Struct:
+	case reflect.Struct: // struct & map are type of Object Marker.
 		return newStructEncoder(t)
 	case reflect.Map:
 		return newMapEncoder(t)
-	case reflect.Slice:
+	case reflect.Slice:  // slice & array are type of Strict Array Marker.
 		return newSliceEncoder(t)
 	case reflect.Array:
 		return newArrayEncoder(t)
@@ -184,7 +181,7 @@ func newTypeEncoder(t reflect.Type) encoderFunc {
 }
 
 func stringEncoder(e *encodeState, v reflect.Value) {
-	e.encodeString(v.String())
+	e.encodeString(v.String(), true)
 }
 
 func boolEncoder(e *encodeState, v reflect.Value) {
@@ -259,6 +256,10 @@ type structEncoder struct {
 	fieldEncs []encoderFunc
 }
 
+// marker: 1 byte 0x03
+// format:
+// - loop encoded string followed by encoded value
+// - terminated with empty string followed by 1 byte 0x09
 func (se *structEncoder) encode(e *encodeState, v reflect.Value) {
 	e.encodeMarker(ObjectMarker)
 	for i, f := range se.fields {
@@ -266,9 +267,10 @@ func (se *structEncoder) encode(e *encodeState, v reflect.Value) {
 		if !fv.IsValid() {
 			continue
 		}
-		e.encodeObjectName(f.name)
+		e.encodeString(f.name, false)
 		se.fieldEncs[i](e, fv)
 	}
+	e.encodeString("", false)
 	e.encodeMarker(ObjectEndMarker)
 }
 
@@ -306,9 +308,10 @@ func (mae *mapEncoder) encode(e *encodeState, v reflect.Value) {
 
 	e.encodeMarker(ObjectMarker)
 	for _, kv := range sv {
-		e.encodeObjectName(kv.s)
+		e.encodeString(kv.s, false)
 		mae.elemEnc(e, v.MapIndex(kv.v))
 	}
+	e.encodeString("", false)
 	e.encodeMarker(ObjectEndMarker)
 }
 
@@ -345,16 +348,19 @@ type arrayEncoder struct {
 	elemEnc encoderFunc
 }
 
+// marker: 1 byte 0x0a
+// format:
+// - 4 byte big endian uint32 to determine length of associative array
+// - n (length) encoded values
 func (ae *arrayEncoder) encode(e *encodeState, v reflect.Value) {
 	n := v.Len()
 	if n == 0 {
 		return
 	}
 
-	e.encodeMarker(ECMAArrayMarker)
+	e.encodeMarker(StrictArrayMarker)
 	e.encodeUint(uint32(n))
 	for i := 0; i < n; i++ {
-		e.encodeObjectName(strconv.Itoa(i))
 		ae.elemEnc(e, v.Index(i))
 	}
 }
@@ -409,7 +415,7 @@ type field struct {
 
 	tag       bool
 	index     []int
-	typ       reflect.Type
+	typo      reflect.Type
 }
 
 func fillField(f field) field {
@@ -438,7 +444,7 @@ func (x byIndex) Less(i, j int) bool {
 
 func typeFields(t reflect.Type) []field {
 	current := []field{}
-	next := []field{{typ: t}}
+	next := []field{{typo: t}}
 
 	count := map[reflect.Type]int{}
 	nextCount := map[reflect.Type]int{}
@@ -452,13 +458,13 @@ func typeFields(t reflect.Type) []field {
 		count, nextCount = nextCount, map[reflect.Type]int{}
 
 		for _, f := range current {
-			if visited[f.typ] {
+			if visited[f.typo] {
 				continue
 			}
-			visited[f.typ] = true
+			visited[f.typo] = true
 
-			for i := 0; i < f.typ.NumField(); i++ {
-				sf := f.typ.Field(i)
+			for i := 0; i < f.typo.NumField(); i++ {
+				sf := f.typo.Field(i)
 				if sf.PkgPath != "" {
 					continue
 				}
@@ -488,9 +494,9 @@ func typeFields(t reflect.Type) []field {
 						name:      name,
 						tag:       tagged,
 						index:     index,
-						typ:       ft,
+						typo:      ft,
 					}))
-					if count[f.typ] > 1 {
+					if count[f.typo] > 1 {
 						fields = append(fields, fields[len(fields)-1])
 					}
 					continue
@@ -498,7 +504,7 @@ func typeFields(t reflect.Type) []field {
 
 				nextCount[ft]++
 				if nextCount[ft] == 1 {
-					next = append(next, fillField(field{name: ft.Name(), index: index, typ: ft}))
+					next = append(next, fillField(field{name: ft.Name(), index: index, typo: ft}))
 				}
 			}
 		}
