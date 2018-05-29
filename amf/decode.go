@@ -5,16 +5,58 @@ import (
 	"reflect"
 	"bytes"
 	"errors"
-	"encoding/binary"
 	"strconv"
+	"encoding/binary"
+	"encoding/base64"
 )
+
+type Number string
+
+func (n Number) String() string { return string(n) }
+
+func (n Number) Float64() (float64, error) {
+	return strconv.ParseFloat(string(n), 64)
+}
+
+func (n Number) Int64() (int64, error) {
+	return strconv.ParseInt(string(n), 10, 64)
+}
+
+var numberType = reflect.TypeOf(Number(""))
+
+type DecodeTypeError struct {
+	Value  string
+	Type   reflect.Type
+	Struct string
+	Field  string
+}
+
+func (e *DecodeTypeError) Error() string {
+	if e.Struct != "" || e.Field != "" {
+		return "amf: cannot decode " + e.Value + " into Go struct field " + e.Struct + "." + e.Field + " of type " + e.Type.String()
+	}
+	return "amf: cannot decode " + e.Value + " into Go value of type " + e.Type.String()
+}
 
 type decodeState struct {
 	r  *bytes.Reader
 }
 
+func (d *decodeState) error(err error) {
+	panic(err)
+}
+
 func (d *decodeState) decodeMarker() (byte, error) {
 	return d.r.ReadByte()
+}
+
+func (d *decodeState) floatInterface() interface{} {
+	var f float64
+	err := binary.Read(d.r, binary.BigEndian, &f)
+	if err != nil {
+		d.error(err)
+	}
+	return f
 }
 
 func (d *decodeState) decodeFloat64(v reflect.Value) error {
@@ -25,21 +67,33 @@ func (d *decodeState) decodeFloat64(v reflect.Value) error {
 	}
 
 	switch v.Kind() {
+	default:
+		if v.Kind() == reflect.String && v.Type() == numberType {
+			v.SetString(strconv.FormatFloat(f, 'f', 6, 64))
+			break
+		}
+		return errors.New("invalid type:" + v.Type().String() + " for float64")
 	case reflect.Float32, reflect.Float64:
 		v.SetFloat(f)
-	case reflect.Int32, reflect.Int, reflect.Int64:
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		v.SetInt(int64(f))
-	case reflect.Uint32, reflect.Uint, reflect.Uint64:
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		v.SetUint(uint64(f))
 	case reflect.Interface:
 		v.Set(reflect.ValueOf(f))
-	default:
-		return errors.New("invalid type:" + v.Type().String() + " for float64")
 	}
 
 	return nil
 }
 
+func (d *decodeState) boolInterface() interface{} {
+	bt, err := d.r.ReadByte()
+	if err != nil {
+		d.error(err)
+	}
+
+	return bt != 0
+}
 
 func (d *decodeState) decodeBool(v reflect.Value) error {
 	bt, err := d.r.ReadByte()
@@ -50,12 +104,12 @@ func (d *decodeState) decodeBool(v reflect.Value) error {
 	b := bt != 0
 
 	switch v.Kind() {
+	default:
+		return errors.New("invalid type:" + v.Type().String() + " for bool")
 	case reflect.Bool:
 		v.SetBool(b)
 	case reflect.Interface:
 		v.Set(reflect.ValueOf(b))
-	default:
-		return errors.New("invalid type:" + v.Type().String() + " for bool")
 	}
 
 	return nil
@@ -94,6 +148,23 @@ func (d *decodeState) decodeObjectName() (string, error) {
 	return string(s), nil
 }
 
+func (d *decodeState) stringInterface() interface{} {
+	u, err := d.decodeUint()
+	if err != nil {
+		d.error(err)
+		return nil
+	}
+
+	s := make([]byte, u)
+	_, err = d.r.Read(s)
+	if err != nil {
+		d.error(err)
+		return nil
+	}
+
+	return string(s)
+}
+
 func (d *decodeState) decodeString(v reflect.Value) error {
 	u, err := d.decodeUint()
 	if err != nil {
@@ -107,24 +178,22 @@ func (d *decodeState) decodeString(v reflect.Value) error {
 	}
 
 	switch v.Kind() {
-	case reflect.Int, reflect.Int32, reflect.Int64:
-		n, err := strconv.ParseInt(string(s), 10, 0)
+	default:
+		return errors.New("unexpected type: " + v.Type().String() + " decoding string")
+	case reflect.Slice:
+		if v.Type().Elem().Kind() != reflect.Uint8 {
+			return &DecodeTypeError{Value: "string", Type: v.Type()}
+		}
+		b := make([]byte, base64.StdEncoding.DecodedLen(len(s)))
+		n, err := base64.StdEncoding.Decode(b, s)
 		if err != nil {
 			return err
 		}
-		v.SetInt(n)
-	case reflect.Uint, reflect.Uint32, reflect.Uint64:
-		n, err := strconv.ParseUint(string(s), 10, 0)
-		if err != nil {
-			return err
-		}
-		v.SetUint(n)
+		v.SetBytes(b[:n])
 	case reflect.String:
 		v.SetString(string(s))
 	case reflect.Interface:
 		v.Set(reflect.ValueOf(string(s)))
-	default:
-		return errors.New("invalid type:" + v.Type().String() + " for string")
 	}
 
 	return nil
@@ -143,28 +212,62 @@ func (d *decodeState) field(s string, t reflect.Type) (reflect.StructField, bool
 	return *new(reflect.StructField), false
 }
 
+func (d *decodeState) objectInterface() map[string]interface{} {
+	m := make(map[string]interface{})
+	for {
+		k, err := d.decodeObjectName()
+		if err != nil {
+			d.error(err)
+		}
+
+		if k == "" {
+			m, err := d.decodeMarker()
+			if err != nil {
+				d.error(err)
+				break
+			}
+			switch m {
+			case ObjectEndMarker:
+				break
+			default:
+				d.error(errors.New("unexpected marker, must be ObjectEndMarker"))
+				return nil
+			}
+		}
+
+		m[k] = d.valueInterface()
+	}
+
+	return m
+}
+
 // marker: 1 byte 0x03
 // format:
 // - loop encoded string followed by encoded value
 // - terminated with empty string followed by 1 byte 0x09
 func (d *decodeState) decodeObject(v reflect.Value) error {
-	if v.Kind() == reflect.Interface {
-		var dummy map[string]interface{}
-		vt := reflect.MakeMap(reflect.TypeOf(dummy))
-		v.Set(vt)
-		v = vt
+	if v.Kind() == reflect.Interface && v.NumMethod() == 0 {
+		v.Set(reflect.ValueOf(d.objectInterface()))
+		return nil
 	}
 
-	if v.Kind() == reflect.Map {
-		if v.IsNil() {
-			vt := reflect.MakeMap(v.Type())
-			v.Set(vt)
-			v = vt
+	switch v.Kind() {
+	case reflect.Map:
+		t := v.Type()
+		switch t.Key().Kind() {
+		case reflect.String,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		default:
+			return errors.New("unexpected map key type, found: " + t.Key().String())
 		}
-	}
-
-	if v.Kind() != reflect.Struct {
-		return errors.New("struct type expected, found:" + v.Type().String())
+		if v.IsNil() {
+			v.Set(reflect.MakeMap(t))
+		}
+	case reflect.Struct:
+		// ok
+	default:
+		return errors.New("unexpected kind type, found: " + v.Type().String())
 	}
 
 	for {
@@ -198,6 +301,10 @@ func (d *decodeState) decodeObject(v reflect.Value) error {
 	}
 }
 
+func (d *decodeState) nullInterface() interface{} {
+	return nil
+}
+
 func (d *decodeState) decodeNull(v reflect.Value) error {
 	if v.IsNil() {
 		return nil
@@ -212,37 +319,85 @@ func (d *decodeState) decodeNull(v reflect.Value) error {
 	return nil
 }
 
+func (d *decodeState) arrayNullInterface() interface{} {
+	return nil
+}
+
 func (d *decodeState) decodeArrayNull(v reflect.Value) error {
 	return nil
 }
 
+func (d *decodeState) ecmaArrayInterface() interface{} {
+	_, err := d.decodeUint32()
+	if err != nil {
+		d.error(err)
+		return nil
+	}
+
+	return d.objectInterface()
+}
+
+// marker: 1 byte 0x08
+// format:
+// - 4 byte big endian uint32 with length of associative array
+// - normal object format:
+//   - loop encoded string followed by encoded value
+//   - terminated with empty string followed by 1 byte 0x09
 func (d *decodeState) decodeECMAArray(v reflect.Value) error {
+	_, err := d.decodeUint32()
+	if err != nil {
+		return err
+	}
+
+	return d.decodeObject(v)
+}
+
+func (d *decodeState) strictArrayInterface() interface{} {
+	u, err := d.decodeUint32()
+	if err != nil {
+		d.error(err)
+		return nil
+	}
+
+	var v = make([]interface{}, 0)
+	for i := uint32(0); i < u; i++ {
+		v = append(v, d.valueInterface())
+	}
+
+	return v
+}
+
+func (d *decodeState) decodeStrictArray(v reflect.Value) error {
 	u, err := d.decodeUint32()
 	if err != nil {
 		return err
 	}
 
-	if v.IsNil() {
-		var vt reflect.Value
-		if v.Type().Kind() == reflect.Slice {
-			vt = reflect.MakeSlice(v.Type(), int(u), int(u))
-		} else if v.Type().Kind() == reflect.Interface {
-			vt = reflect.ValueOf(make([]interface{},int(u), int(u)))
-		} else {
-			return errors.New("invalid type:" + v.Type().String() + " for array")
-		}
-		v.Set(vt)
-		v = vt
-	}
-
-	for i := 0; i < int(u); i++ {
-		err := d.decode(v.Index(i))
+	for i := uint32(0); i < u; i++ {
+		err := d.decode(v)
 		if err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func (d *decodeState) longStringInterface() interface{} {
+	u, err := d.decodeUint32()
+	if err != nil {
+		d.error(err)
+		return nil
+	}
+
+	s := make([]byte, u)
+	_, err = d.r.Read(s)
+	if err != nil {
+		d.error(err)
+		return nil
+	}
+
+	return string(s)
 }
 
 func (d *decodeState) decodeLongString(v reflect.Value) error {
@@ -288,6 +443,8 @@ func (d *decodeState) decodeValue(v reflect.Value) error {
 	}
 
 	switch m {
+	default:
+		return errors.New("unexpected marker type")
 	case NumberMarker:
 		return d.decodeFloat64(v)
 	case BooleanMarker:
@@ -303,7 +460,9 @@ func (d *decodeState) decodeValue(v reflect.Value) error {
 	case ECMAArrayMarker:
 		return d.decodeECMAArray(v)
 	case StrictArrayMarker:
+		return d.decodeStrictArray(v)
 	case DateMarker:
+		// return d.decodeDate(v)
 	case LongStringMarker:
 		return d.decodeLongString(v)
 	}
@@ -340,6 +499,42 @@ func (d *decodeState) decode(v interface{}) (err error) {
 	}
 
 	return d.decodeValue(rv)
+}
+
+func (d *decodeState) valueInterface() interface{} {
+	m, err := d.decodeMarker()
+	if err != nil {
+		d.error(errors.New("failed to read marker"))
+		return nil
+	}
+
+	switch m {
+	default:
+		d.error(errors.New("unexpected marker type"))
+		return nil
+	case NumberMarker:
+		return d.floatInterface()
+	case BooleanMarker:
+		return d.boolInterface()
+	case StringMarker:
+		return d.stringInterface()
+	case ObjectMarker:
+		return d.objectInterface()
+	case NullMarker:
+		return d.nullInterface()
+	case ArrayNullMarker:
+		return d.arrayNullInterface()
+	case ECMAArrayMarker:
+		return d.ecmaArrayInterface()
+	case StrictArrayMarker:
+		return d.strictArrayInterface()
+	case DateMarker:
+		// return d.dateInterface()
+	case LongStringMarker:
+		return d.longStringInterface()
+	}
+
+	return nil
 }
 
 func Decode(data []byte, v interface{}) error {
