@@ -42,6 +42,34 @@ type decodeState struct {
 	r  *bytes.Reader
 }
 
+func (d *decodeState) indirect(v reflect.Value) reflect.Value {
+	// If v is a named type and is addressable,
+	// start with its address, so that if the type has pointer methods,
+	// we find them.
+	if v.Kind() != reflect.Ptr && v.Type().Name() != "" && v.CanAddr() {
+		v = v.Addr()
+	}
+	for {
+		// Load value from interface, but only if the result will be
+		// usefully addressable.
+		if v.Kind() == reflect.Interface && !v.IsNil() {
+			e := v.Elem()
+			if e.Kind() == reflect.Ptr && !e.IsNil() {
+				v = e
+				continue
+			}
+		}
+		if v.Kind() != reflect.Ptr {
+			break
+		}
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		v = v.Elem()
+	}
+	return v
+}
+
 func (d *decodeState) error(err error) {
 	panic(err)
 }
@@ -66,13 +94,15 @@ func (d *decodeState) decodeFloat64(v reflect.Value) error {
 		return err
 	}
 
+	v = d.indirect(v)
+
 	switch v.Kind() {
 	default:
 		if v.Kind() == reflect.String && v.Type() == numberType {
 			v.SetString(strconv.FormatFloat(f, 'f', 6, 64))
 			break
 		}
-		return errors.New("invalid type:" + v.Type().String() + " for float64")
+		return errors.New("unexpected kind (" + v.Type().String() + ") when decoding float64")
 	case reflect.Float32, reflect.Float64:
 		v.SetFloat(f)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -103,9 +133,11 @@ func (d *decodeState) decodeBool(v reflect.Value) error {
 
 	b := bt != 0
 
+	v = d.indirect(v)
+
 	switch v.Kind() {
 	default:
-		return errors.New("invalid type:" + v.Type().String() + " for bool")
+		return errors.New("unexpected kind (" + v.Type().String() + ") when decoding bool")
 	case reflect.Bool:
 		v.SetBool(b)
 	case reflect.Interface:
@@ -117,7 +149,7 @@ func (d *decodeState) decodeBool(v reflect.Value) error {
 
 func (d *decodeState) decodeUint() (uint16, error) {
 	var u uint16
-	err := binary.Read(d.r, binary.BigEndian, u)
+	err := binary.Read(d.r, binary.BigEndian, &u)
 	if err != nil {
 		return 0, err
 	}
@@ -126,7 +158,7 @@ func (d *decodeState) decodeUint() (uint16, error) {
 
 func (d *decodeState) decodeUint32() (uint32, error) {
 	var u uint32
-	err := binary.Read(d.r, binary.BigEndian, u)
+	err := binary.Read(d.r, binary.BigEndian, &u)
 	if err != nil {
 		return 0, err
 	}
@@ -176,6 +208,8 @@ func (d *decodeState) decodeString(v reflect.Value) error {
 	if err != nil {
 		return err
 	}
+
+	v = d.indirect(v)
 
 	switch v.Kind() {
 	default:
@@ -251,6 +285,8 @@ func (d *decodeState) decodeObject(v reflect.Value) error {
 		return nil
 	}
 
+	v = d.indirect(v)
+
 	switch v.Kind() {
 	case reflect.Map:
 		t := v.Type()
@@ -267,36 +303,81 @@ func (d *decodeState) decodeObject(v reflect.Value) error {
 	case reflect.Struct:
 		// ok
 	default:
-		return errors.New("unexpected kind type, found: " + v.Type().String())
+		return &DecodeTypeError{Value: "object", Type: v.Type()}
 	}
 
+	var mapElem reflect.Value
+
 	for {
-		s, err := d.decodeObjectName()
+		on, err := d.decodeObjectName()
 		if err != nil {
 			return err
 		}
 
-		if s == "" {
+		if on == "" {
 			m, err := d.decodeMarker()
 			if err != nil {
 				return err
 			}
 			switch m {
 			case ObjectEndMarker:
-				break
+				return nil
 			default:
 				return errors.New("expect object end marker")
 			}
 		}
 
-		f, ok := d.field(s, v.Type())
-		if !ok {
-			return errors.New("key: " + s + " not found in struct:" + v.Type().String())
+		var subv reflect.Value
+
+		if v.Kind() == reflect.Map {
+			elemType := v.Type().Elem()
+			if !mapElem.IsValid() {
+				mapElem = reflect.New(elemType).Elem()
+			} else {
+				mapElem.Set(reflect.Zero(elemType))
+			}
+			subv = mapElem
+		} else {
+			f, ok := d.field(on, v.Type())
+			if !ok {
+				return errors.New("object name (" + on + ") not found in " + v.Type().String())
+			}
+
+			subv = v.FieldByName(f.Name)
 		}
 
-		err = d.decode(v.FieldByName(f.Name))
+		err = d.decodeValue(subv)
 		if err != nil {
 			return err
+		}
+
+		if v.Kind() == reflect.Map {
+			kt := v.Type().Key()
+			var kv reflect.Value
+			switch {
+			case kt.Kind() == reflect.String:
+				kv = reflect.ValueOf(on).Convert(kt)
+			default:
+				switch kt.Kind() {
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+					s := string(on)
+					n, err := strconv.ParseInt(s, 10, 64)
+					if err != nil || reflect.Zero(kt).OverflowInt(n) {
+						return &DecodeTypeError{Value: "number " + s, Type: kt}
+					}
+					kv = reflect.ValueOf(n).Convert(kt)
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+					s := string(on)
+					n, err := strconv.ParseUint(s, 10, 64)
+					if err != nil || reflect.Zero(kt).OverflowUint(n) {
+						return &DecodeTypeError{Value: "number " + s, Type: kt}
+					}
+					kv = reflect.ValueOf(n).Convert(kt)
+				default:
+					panic("amf: Unexpected key type") // should never occur
+				}
+			}
+			v.SetMapIndex(kv, subv)
 		}
 	}
 }
@@ -309,12 +390,15 @@ func (d *decodeState) decodeNull(v reflect.Value) error {
 	if v.IsNil() {
 		return nil
 	}
+
+	v = d.indirect(v)
+
 	switch v.Kind() {
+	default:
+		return errors.New("unexpected kind (" + v.Type().String() + ") when decoding null")
 	case reflect.Interface, reflect.Slice, reflect.Map, reflect.Ptr:
 		v.Set(reflect.Zero(v.Type()))
 		return nil
-	default:
-		return errors.New("invalid type:" + v.Type().String() + " for nil")
 	}
 	return nil
 }
@@ -383,6 +467,40 @@ func (d *decodeState) decodeStrictArray(v reflect.Value) error {
 	return nil
 }
 
+func (d *decodeState) dateInterface() interface{} {
+	var f float64
+	err := binary.Read(d.r, binary.BigEndian, &f)
+	if err != nil {
+		d.error(err)
+		return nil
+	}
+
+	s := make([]byte, 2)
+	_, err = d.r.Read(s)
+	if err != nil {
+		d.error(err)
+		return nil
+	}
+
+	return nil
+}
+
+func (d *decodeState) decodeDate(v reflect.Value) error {
+	var f float64
+	err := binary.Read(d.r, binary.BigEndian, &f)
+	if err != nil {
+		return err
+	}
+
+	s := make([]byte, 2)
+	_, err = d.r.Read(s)
+	if err != nil {
+		return nil
+	}
+
+	return nil
+}
+
 func (d *decodeState) longStringInterface() interface{} {
 	u, err := d.decodeUint32()
 	if err != nil {
@@ -412,7 +530,11 @@ func (d *decodeState) decodeLongString(v reflect.Value) error {
 		return err
 	}
 
+	v = d.indirect(v)
+
 	switch v.Kind() {
+	default:
+		return errors.New("unexpected kind (" + v.Type().String() + ") when decoding string")
 	case reflect.Int, reflect.Int32, reflect.Int64:
 		n, err := strconv.ParseInt(string(s), 10, 0)
 		if err != nil {
@@ -429,11 +551,25 @@ func (d *decodeState) decodeLongString(v reflect.Value) error {
 		v.SetString(string(s))
 	case reflect.Interface:
 		v.Set(reflect.ValueOf(string(s)))
-	default:
-		return errors.New("invalid type:" + v.Type().String() + " for string")
 	}
 
 	return nil
+}
+
+func (d *decodeState) unsupportedInterface() interface{} {
+	return nil
+}
+
+func (d *decodeState) decodeUnsupported(v reflect.Value) error {
+	return nil
+}
+
+func (d *decodeState) xmlDocumentInterface() interface{} {
+	return d.longStringInterface()
+}
+
+func (d *decodeState) decodeXMLDocument(v reflect.Value) error {
+	return d.decodeLongString(v)
 }
 
 func (d *decodeState) decodeValue(v reflect.Value) error {
@@ -453,18 +589,30 @@ func (d *decodeState) decodeValue(v reflect.Value) error {
 		return d.decodeString(v)
 	case ObjectMarker:
 		return d.decodeObject(v)
+	case MovieClipMarker:
+		return errors.New("decode amf0: unsupported type movieclip")
 	case NullMarker:
 		return d.decodeNull(v)
 	case ArrayNullMarker:
 		return d.decodeArrayNull(v)
+	case ReferenceMarker:
+		return errors.New("decode amf0: unsupported type reference")
 	case ECMAArrayMarker:
 		return d.decodeECMAArray(v)
 	case StrictArrayMarker:
 		return d.decodeStrictArray(v)
 	case DateMarker:
-		// return d.decodeDate(v)
+		return d.decodeDate(v)
 	case LongStringMarker:
 		return d.decodeLongString(v)
+	case UnsupportedMarker:
+		return d.decodeUnsupported(v)
+	case RecordSetMarker:
+		return errors.New("decode amf0: unsupported type recordset")
+	case XMLDocumentMarker:
+		return d.decodeXMLDocument(v)
+	case TypedObjectMarker:
+		return errors.New("decode amf0: unsupported type typedobject")
 	}
 }
 
@@ -511,7 +659,6 @@ func (d *decodeState) valueInterface() interface{} {
 	switch m {
 	default:
 		d.error(errors.New("unexpected marker type"))
-		return nil
 	case NumberMarker:
 		return d.floatInterface()
 	case BooleanMarker:
@@ -520,18 +667,30 @@ func (d *decodeState) valueInterface() interface{} {
 		return d.stringInterface()
 	case ObjectMarker:
 		return d.objectInterface()
+	case MovieClipMarker:
+		d.error(errors.New("decode amf0: unsupported type movieclip"))
 	case NullMarker:
 		return d.nullInterface()
 	case ArrayNullMarker:
 		return d.arrayNullInterface()
+	case ReferenceMarker:
+		d.error(errors.New("decode amf0: unsupported type reference"))
 	case ECMAArrayMarker:
 		return d.ecmaArrayInterface()
 	case StrictArrayMarker:
 		return d.strictArrayInterface()
 	case DateMarker:
-		// return d.dateInterface()
+		return d.dateInterface()
 	case LongStringMarker:
 		return d.longStringInterface()
+	case UnsupportedMarker:
+		return d.unsupportedInterface()
+	case RecordSetMarker:
+		d.error(errors.New("decode amf0: unsupported type recordset"))
+	case XMLDocumentMarker:
+		return d.xmlDocumentInterface()
+	case TypedObjectMarker:
+		d.error(errors.New("decode amf0: unsupported type typedobject"))
 	}
 
 	return nil

@@ -82,13 +82,13 @@ func (w *reflectWithString) resolve() error {
 	panic("unexpected map key type")
 }
 
-func (e *encodeState) encodeString(s string, marker bool) {
+func (e *encodeState) encodeString(s string) {
 	l := len(s)
 	if l > LongStringSize {
-		if marker { e.encodeMarker(LongStringMarker) }
+		e.encodeMarker(LongStringMarker)
 		e.encodeUint(uint32(l))
 	} else {
-		if marker { e.encodeMarker(StringMarker) }
+		e.encodeMarker(StringMarker)
 		e.encodeUint(uint16(l))
 	}
 	e.Write([]byte(s))
@@ -181,7 +181,7 @@ func newTypeEncoder(t reflect.Type) encoderFunc {
 }
 
 func stringEncoder(e *encodeState, v reflect.Value) {
-	e.encodeString(v.String(), true)
+	e.encodeString(v.String())
 }
 
 func boolEncoder(e *encodeState, v reflect.Value) {
@@ -267,10 +267,10 @@ func (se *structEncoder) encode(e *encodeState, v reflect.Value) {
 		if !fv.IsValid() {
 			continue
 		}
-		e.encodeString(f.name, false)
+		e.encodeObjectName(f.name)
 		se.fieldEncs[i](e, fv)
 	}
-	e.encodeString("", false)
+	e.encodeObjectName("")
 	e.encodeMarker(ObjectEndMarker)
 }
 
@@ -308,10 +308,10 @@ func (mae *mapEncoder) encode(e *encodeState, v reflect.Value) {
 
 	e.encodeMarker(ObjectMarker)
 	for _, kv := range sv {
-		e.encodeString(kv.s, false)
+		e.encodeObjectName(kv.s)
 		mae.elemEnc(e, v.MapIndex(kv.v))
 	}
-	e.encodeString("", false)
+	e.encodeObjectName("")
 	e.encodeMarker(ObjectEndMarker)
 }
 
