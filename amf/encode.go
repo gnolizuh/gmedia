@@ -399,11 +399,13 @@ func (e *UnsupportedTypeError) Error() string {
 	return "amf: unsupported type: " + e.Type.String()
 }
 
-func Encode(v interface{}) ([]byte, error) {
+func Encode(vs ...interface{}) ([]byte, error) {
 	e := &encodeState{}
-	err := e.encode(v)
-	if err != nil {
-		return nil, err
+	for _, v := range vs {
+		err := e.encode(v)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return e.Bytes(), nil
 }

@@ -4,41 +4,41 @@ import (
 	"fmt"
 	"log"
 	"errors"
-	"bufio"
 	"encoding/binary"
+	"io"
 )
 
 type Handler interface {
 	Handle (*Stream) error
 }
 
-func readUint32(reader *bufio.Reader) (uint32, error) {
-	buf := make([]byte, 4)
-	_, err := reader.Read(buf)
+func readUint32(r io.Reader) (uint32, error) {
+	var b uint32
+	err := binary.Read(r, binary.BigEndian, &b)
 	if err != nil {
 		return 0, err
 	}
 
-	return binary.BigEndian.Uint32(buf), nil
+	return b, nil
 }
 
-func readUint16(reader *bufio.Reader) (uint16, error) {
-	buf := make([]byte, 2)
-	_, err := reader.Read(buf)
+func readUint16(r io.Reader) (uint16, error) {
+	var b uint16
+	err := binary.Read(r, binary.BigEndian, &b)
 	if err != nil {
 		return 0, err
 	}
 
-	return binary.BigEndian.Uint16(buf), nil
+	return b, nil
 }
 
-func readUint8(reader *bufio.Reader) (uint8, error) {
-	buf, err := reader.ReadByte()
+func readUint8(r io.ByteReader) (uint8, error) {
+	b, err := r.ReadByte()
 	if err != nil {
 		return 0, err
 	}
 
-	return uint8(buf), nil
+	return uint8(b), nil
 }
 
 type ServerHandler struct {
@@ -91,7 +91,7 @@ func (sh *ServerHandler) Handle(stm *Stream) error {
 }
 
 func (sh *ServerHandler) onSetChunkSize(msg *Message) error {
-	cs, err := readUint32(msg.reader)
+	cs, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
@@ -104,7 +104,7 @@ func (sh *ServerHandler) onSetChunkSize(msg *Message) error {
 }
 
 func (sh *ServerHandler) onAbort(msg *Message) error {
-	csid, err := readUint32(msg.reader)
+	csid, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
@@ -115,7 +115,7 @@ func (sh *ServerHandler) onAbort(msg *Message) error {
 }
 
 func (sh *ServerHandler) onAck(msg *Message) error {
-	seq, err := readUint32(msg.reader)
+	seq, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func (sh *ServerHandler) onAck(msg *Message) error {
 }
 
 func (sh *ServerHandler) onUserControl(msg *Message) error {
-	evt, err := readUint16(msg.reader)
+	evt, err := readUint16(msg)
 	if err != nil {
 		return err
 	}
@@ -137,14 +137,14 @@ func (sh *ServerHandler) onUserControl(msg *Message) error {
 
 	uh := sh.userMessageHandlers[evt]
 	if uh != nil {
-		return uh(msg.reader)
+		return uh(msg)
 	}
 
 	return errors.New(fmt.Sprintf("unexpected user message type: %d", evt))
 }
 
 func (sh *ServerHandler) onWinAckSize(msg *Message) error {
-	win, err := readUint32(msg.reader)
+	win, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
@@ -157,12 +157,12 @@ func (sh *ServerHandler) onWinAckSize(msg *Message) error {
 }
 
 func (sh *ServerHandler) onSetPeerBandwidth(msg *Message) error {
-	bandwidth, err := readUint32(msg.reader)
+	bandwidth, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
 
-	limit, err := readUint8(msg.reader)
+	limit, err := readUint8(msg)
 	if err != nil {
 		return err
 	}
@@ -212,8 +212,8 @@ func (sh *ServerHandler) onAggregate(msg *Message) error {
 	return nil
 }
 
-func (sh *ServerHandler) onUserStreamBegin(reader *bufio.Reader) error {
-	msid, err := readUint32(reader)
+func (sh *ServerHandler) onUserStreamBegin(msg *Message) error {
+	msid, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
@@ -223,8 +223,8 @@ func (sh *ServerHandler) onUserStreamBegin(reader *bufio.Reader) error {
 	return nil
 }
 
-func (sh *ServerHandler) onUserStreamEOF(reader *bufio.Reader) error {
-	msid, err := readUint32(reader)
+func (sh *ServerHandler) onUserStreamEOF(msg *Message) error {
+	msid, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
@@ -234,8 +234,8 @@ func (sh *ServerHandler) onUserStreamEOF(reader *bufio.Reader) error {
 	return nil
 }
 
-func (sh *ServerHandler) onUserStreamDry(reader *bufio.Reader) error {
-	msid, err := readUint32(reader)
+func (sh *ServerHandler) onUserStreamDry(msg *Message) error {
+	msid, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
@@ -245,13 +245,13 @@ func (sh *ServerHandler) onUserStreamDry(reader *bufio.Reader) error {
 	return nil
 }
 
-func (sh *ServerHandler) onUserSetBufLen(reader *bufio.Reader) error {
-	msid, err := readUint32(reader)
+func (sh *ServerHandler) onUserSetBufLen(msg *Message) error {
+	msid, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
 
-	buflen, err := readUint32(reader)
+	buflen, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
@@ -261,8 +261,8 @@ func (sh *ServerHandler) onUserSetBufLen(reader *bufio.Reader) error {
 	return nil
 }
 
-func (sh *ServerHandler) onUserIsRecorded(reader *bufio.Reader) error {
-	msid, err := readUint32(reader)
+func (sh *ServerHandler) onUserIsRecorded(msg *Message) error {
+	msid, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
@@ -272,8 +272,8 @@ func (sh *ServerHandler) onUserIsRecorded(reader *bufio.Reader) error {
 	return nil
 }
 
-func (sh *ServerHandler) onUserPingRequest(reader *bufio.Reader) error {
-	timestamp, err := readUint32(reader)
+func (sh *ServerHandler) onUserPingRequest(msg *Message) error {
+	timestamp, err := readUint32(msg)
 	if err != nil {
 		return err
 	}
@@ -285,8 +285,8 @@ func (sh *ServerHandler) onUserPingRequest(reader *bufio.Reader) error {
 	return nil
 }
 
-func (sh *ServerHandler) onUserPingResponse(reader *bufio.Reader) error {
-	timestamp, err := readUint32(reader)
+func (sh *ServerHandler) onUserPingResponse(msg *Message) error {
+	timestamp, err := readUint32(msg)
 	if err != nil {
 		return err
 	}

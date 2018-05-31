@@ -39,7 +39,7 @@ func (e *DecodeTypeError) Error() string {
 }
 
 type decodeState struct {
-	r  *bytes.Reader
+	r *bytes.Reader
 }
 
 func (d *decodeState) indirect(v reflect.Value) reflect.Value {
@@ -696,8 +696,26 @@ func (d *decodeState) valueInterface() interface{} {
 	return nil
 }
 
-func Decode(data []byte, v interface{}) error {
+func Decode(b []byte, vs ...interface{}) error {
 	d := decodeState{}
-	d.r = bytes.NewReader(data)
-	return d.decode(v)
+	d.r = bytes.NewReader(b)
+	for _, v := range vs {
+		err := d.decode(v)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func DecodeWithReader(r *bytes.Reader, vs ...interface{}) error {
+	d := decodeState{}
+	d.r = r
+	for _, v := range vs {
+		err := d.decode(v)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

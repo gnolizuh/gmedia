@@ -31,7 +31,7 @@ const (
 
 type MessageHandler func (*Message) error
 
-type UserMessageHandler func (*bufio.Reader) error
+type UserMessageHandler func (*Message) error
 
 // Header declare.
 type Header struct {
@@ -126,7 +126,7 @@ func (c *Conn) serve() {
 	for {
 		err := c.pumpMessage()
 		if err != nil {
-			log.Panic(err)
+			log.Println(err)
 			return
 		}
 	}

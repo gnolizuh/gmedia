@@ -68,17 +68,26 @@ type ChunkType struct {
 	off uint32
 }
 
-func (c *ChunkType) Read(p []byte) (int, error) {
+func (ct *ChunkType) Read(p []byte) (int, error) {
 	n := uint32(len(p))
-	m := uint32(len(c.buf[c.off:]))
+	m := uint32(len(ct.buf[ct.off:]))
 
 	if read := min(n, m); read > 0 {
-		copy(p, c.buf[:read])
-		c.off += read
+		copy(p, ct.buf[:read])
+		ct.off += read
 		return int(read), nil
 	}
 
 	return 0, io.EOF
+}
+
+func (ct *ChunkType) ReadByte() (byte, error) {
+	if len(ct.buf[ct.off:]) <= 0 {
+		return 0, io.EOF
+	}
+	b := ct.buf[ct.off]
+	ct.off++
+	return b, nil
 }
 
 type ChunkList struct {
@@ -90,7 +99,7 @@ type ChunkList struct {
 
 func newChunkList() *ChunkList {
 	return &ChunkList{
-		chunks: make([]*ChunkType, 4),
+		chunks: []*ChunkType{},
 		read: 0,
 		off: 0,
 		has: 0,
@@ -108,32 +117,45 @@ func (cl *ChunkList) appendChunk(ch *ChunkType) {
 // len(p). At EOF, the count will be zero and err will be
 // io.EOF.
 func (cl *ChunkList) Read(p []byte) (int, error) {
-	off := 0
+	l := len(p)
+	r := 0
 	for cl.off < cl.has {
 		ch := cl.chunks[cl.off]
-		n, err := io.ReadFull(ch, p[off:])
+		n, err := ch.Read(p[r:])
 		if err != nil {
-			return off, err
+			return r + n, err
 		}
-
-		off += n
-
-		// last chunk reached.
-		if n < len(ch.buf) {
-			return off, nil
+		r += n
+		l -= n
+		if len(ch.buf[ch.off:]) == 0 {
+			ch.off++
 		}
-
-		// n MUST be equal to len(ch.buf).
-		ch.off++
+		if l == 0 {
+			return r, nil
+		}
 	}
-	return off, io.EOF
+	return r, io.EOF
+}
+
+func (cl *ChunkList) ReadByte() (byte, error) {
+	if cl.off < cl.has {
+		ch := cl.chunks[cl.off]
+		b, err := ch.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		if len(ch.buf[ch.off:]) == 0 {
+			ch.off++
+		}
+		return b, nil
+	}
+	return 0, io.EOF
 }
 
 // RTMP message declare.
 type Message struct {
 	hdr    *Header
 	body   *ChunkList
-	reader *bufio.Reader
 }
 
 func newMessage(hdr *Header) *Message {
@@ -141,10 +163,17 @@ func newMessage(hdr *Header) *Message {
 		hdr: hdr,
 		body: newChunkList(),
 	}
-	msg.reader = bufio.NewReader(msg.body)
 	return &msg
 }
 
 func (m *Message) appendChunk(ch *ChunkType) {
 	m.body.appendChunk(ch)
+}
+
+func (m *Message) Read(p []byte) (int, error) {
+	return m.body.Read(p)
+}
+
+func (m *Message) ReadByte() (byte, error) {
+	return m.body.ReadByte()
 }

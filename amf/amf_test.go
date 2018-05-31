@@ -126,3 +126,30 @@ func TestEncodeStruct2Map(t *testing.T) {
 
 	fmt.Printf("passed: %v\n", out)
 }
+
+func TestEncodeVars(t *testing.T) {
+	in_name := "publish"
+	in_num := 10
+	in_obj := AMFStruct{
+		Int: 10,
+		String: "1",
+		Bool: true,
+	}
+
+	b, err := Encode(&in_name, &in_num, &in_obj)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	var out_name string
+	var out_num int
+	out_obj := make(map[string]interface{}, 4)
+	err = Decode(b, &out_name, &out_num, &out_obj)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	fmt.Printf("passed: %s %d %v\n", out_name, out_num, out_obj)
+}
