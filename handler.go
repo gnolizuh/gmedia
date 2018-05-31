@@ -6,6 +6,7 @@ import (
 	"errors"
 	"encoding/binary"
 	"io"
+	"github.com/gnolizuh/rtmp/amf"
 )
 
 type Handler interface {
@@ -205,6 +206,16 @@ func (sh *ServerHandler) onAmf0Shared(msg *Message) error {
 }
 
 func (sh *ServerHandler) onAmf0Cmd(msg *Message) error {
+	var name string
+	var tran int
+	err := amf.DecodeWithReader(msg, &name, &tran)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Printf("receive amf0 command: name=%s tran=%d\n", name, tran)
+
 	return nil
 }
 

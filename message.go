@@ -73,7 +73,7 @@ func (ct *ChunkType) Read(p []byte) (int, error) {
 	m := uint32(len(ct.buf[ct.off:]))
 
 	if read := min(n, m); read > 0 {
-		copy(p, ct.buf[:read])
+		copy(p, ct.buf[ct.off:ct.off+read])
 		ct.off += read
 		return int(read), nil
 	}

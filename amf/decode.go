@@ -10,6 +10,11 @@ import (
 	"encoding/base64"
 )
 
+type IOReader interface {
+	Read(b []byte) (int, error)
+	ReadByte() (byte, error)
+}
+
 type Number string
 
 func (n Number) String() string { return string(n) }
@@ -39,7 +44,7 @@ func (e *DecodeTypeError) Error() string {
 }
 
 type decodeState struct {
-	r *bytes.Reader
+	r IOReader
 }
 
 func (d *decodeState) indirect(v reflect.Value) reflect.Value {
@@ -147,7 +152,7 @@ func (d *decodeState) decodeBool(v reflect.Value) error {
 	return nil
 }
 
-func (d *decodeState) decodeUint() (uint16, error) {
+func (d *decodeState) decodeUint16() (uint16, error) {
 	var u uint16
 	err := binary.Read(d.r, binary.BigEndian, &u)
 	if err != nil {
@@ -166,7 +171,7 @@ func (d *decodeState) decodeUint32() (uint32, error) {
 }
 
 func (d *decodeState) decodeObjectName() (string, error) {
-	u, err := d.decodeUint()
+	u, err := d.decodeUint16()
 	if err != nil {
 		return "", err
 	}
@@ -181,7 +186,7 @@ func (d *decodeState) decodeObjectName() (string, error) {
 }
 
 func (d *decodeState) stringInterface() interface{} {
-	u, err := d.decodeUint()
+	u, err := d.decodeUint16()
 	if err != nil {
 		d.error(err)
 		return nil
@@ -198,7 +203,7 @@ func (d *decodeState) stringInterface() interface{} {
 }
 
 func (d *decodeState) decodeString(v reflect.Value) error {
-	u, err := d.decodeUint()
+	u, err := d.decodeUint16()
 	if err != nil {
 		return err
 	}
@@ -708,7 +713,7 @@ func Decode(b []byte, vs ...interface{}) error {
 	return nil
 }
 
-func DecodeWithReader(r *bytes.Reader, vs ...interface{}) error {
+func DecodeWithReader(r IOReader, vs ...interface{}) error {
 	d := decodeState{}
 	d.r = r
 	for _, v := range vs {
