@@ -44,8 +44,7 @@ func (srv *Server) Serve(l net.Listener) error {
 
 		c := newConn(rw)
 
-		// Register message reader and set connection state.
-		c.msgReader = srv
+		// Set connection state.
 		c.state = StateServerRecvChallenge
 		c.handler = newServerHandler(c)
 

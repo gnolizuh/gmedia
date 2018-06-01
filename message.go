@@ -2,7 +2,9 @@ package rtmp
 
 import (
 	"io"
+	"errors"
 	"bufio"
+	"fmt"
 )
 
 type MessageType int
@@ -63,51 +65,67 @@ func max(n, m uint32) uint32 {
 }
 
 // RTMP message chunk declare.
-type ChunkType struct {
+type Chunk struct {
 	buf []byte
 	off uint32
+	pos uint32
 }
 
-func (ct *ChunkType) Read(p []byte) (int, error) {
+func newChunk(cs uint32) *Chunk {
+	return &Chunk{
+		buf: make([]byte, cs + MaxMessageHeaderSize),
+		off: MaxMessageHeaderSize,
+		pos: MaxMessageHeaderSize,
+	}
+}
+
+func (ck *Chunk) Bytes(n uint32) []byte {
+	// assert n <= len(ck.buf[ck.off:])
+	return ck.buf[ck.off:ck.off+n]
+}
+
+func (ck *Chunk) Read(p []byte) (int, error) {
 	n := uint32(len(p))
-	m := uint32(len(ct.buf[ct.off:]))
+	m := uint32(len(ck.buf[ck.off:]))
 
 	if read := min(n, m); read > 0 {
-		copy(p, ct.buf[ct.off:ct.off+read])
-		ct.off += read
+		copy(p, ck.buf[ck.off:ck.off+read])
+		ck.off += read
 		return int(read), nil
 	}
 
 	return 0, io.EOF
 }
 
-func (ct *ChunkType) ReadByte() (byte, error) {
-	if len(ct.buf[ct.off:]) <= 0 {
+func (ck *Chunk) ReadByte() (byte, error) {
+	if len(ck.buf[ck.off:]) <= 0 {
 		return 0, io.EOF
 	}
-	b := ct.buf[ct.off]
-	ct.off++
+	b := ck.buf[ck.off]
+	ck.off++
 	return b, nil
 }
 
+func (ck *Chunk) Size() uint32 {
+	return ck.off - ck.pos
+}
+
 type ChunkList struct {
-	chunks []*ChunkType
-	read   uint32
-	off    uint32
-	has    uint32
+	chs []*Chunk
+	off uint32
+	has uint32
 }
 
 func newChunkList() *ChunkList {
 	return &ChunkList{
-		chunks: []*ChunkType{},
-		read: 0,
+		chs: []*Chunk{},
 		off: 0,
 		has: 0,
 	}
 }
 
-func (cl *ChunkList) appendChunk(ch *ChunkType) {
-	cl.chunks = append(cl.chunks, ch)
+func (cl *ChunkList) appendChunk(ch *Chunk) {
+	cl.chs = append(cl.chs, ch)
 	cl.has++
 }
 
@@ -120,7 +138,7 @@ func (cl *ChunkList) Read(p []byte) (int, error) {
 	l := len(p)
 	r := 0
 	for cl.off < cl.has {
-		ch := cl.chunks[cl.off]
+		ch := cl.chs[cl.off]
 		n, err := ch.Read(p[r:])
 		if err != nil {
 			return r + n, err
@@ -139,7 +157,7 @@ func (cl *ChunkList) Read(p []byte) (int, error) {
 
 func (cl *ChunkList) ReadByte() (byte, error) {
 	if cl.off < cl.has {
-		ch := cl.chunks[cl.off]
+		ch := cl.chs[cl.off]
 		b, err := ch.ReadByte()
 		if err != nil {
 			return 0, err
@@ -150,6 +168,14 @@ func (cl *ChunkList) ReadByte() (byte, error) {
 		return b, nil
 	}
 	return 0, io.EOF
+}
+
+func (cl *ChunkList) Size() (uint32) {
+	l := uint32(0)
+	for i := cl.off; i < cl.has; i++ {
+		i += cl.chs[cl.off].Size()
+	}
+	return l
 }
 
 // RTMP message declare.
@@ -166,8 +192,8 @@ func newMessage(hdr *Header) *Message {
 	return &msg
 }
 
-func (m *Message) appendChunk(ch *ChunkType) {
-	m.body.appendChunk(ch)
+func (m *Message) appendChunk(ck *Chunk) {
+	m.body.appendChunk(ck)
 }
 
 func (m *Message) Read(p []byte) (int, error) {
@@ -176,4 +202,14 @@ func (m *Message) Read(p []byte) (int, error) {
 
 func (m *Message) ReadByte() (byte, error) {
 	return m.body.ReadByte()
+}
+
+// TODO: fill with RTMP header
+func (m *Message) prepare(hdr *Header) error {
+	if m.hdr.csid > MaxStreamsNum {
+		return errors.New(fmt.Sprintf("RTMP out chunk stream too big: %d >= %d", m.hdr.csid, MaxStreamsNum))
+	}
+
+	// n := m.body.Size()
+	return nil
 }

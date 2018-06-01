@@ -24,7 +24,8 @@ const (
 
 	MaxHeaderSize = MaxBasicHeaderSize + MaxMessageHeaderSize + MaxExtendHeaderSize
 
-	DefaultChunkSize = 128
+	DefaultReadChunkSize = 128
+	DefaultSendChunkSize = 4096
 
 	MaxStreamsNum = 32
 )
@@ -49,6 +50,26 @@ var headerSharedPool = sync.Pool{
 		hd := make([]byte, MaxHeaderSize)
 		return &hd
 	},
+}
+
+var sharedBufferPool = sync.Pool{
+	New: func() interface{} {
+		hd := make([]byte, DefaultSendChunkSize)
+		return &hd
+	},
+}
+
+const (
+	AudioChunkStream = iota
+	VideoChunkStream
+	MaxChunkStream
+)
+
+type ChunkStream struct {
+	active     bool
+	timestamp  uint32
+	csid       uint32
+	dropped    uint32
 }
 
 // RTMP stream declare.
@@ -77,6 +98,9 @@ type Conn struct {
 	// stream message
 	streams    []Stream
 
+	// chunk stream
+	cs         [MaxChunkStream]ChunkStream
+
 	// chunk message
 	chunkSize  uint32
 	chunkPool  *sync.Pool
@@ -87,15 +111,14 @@ type Conn struct {
 	inLastAck  uint32
 
 	// message callback function.
-	msgReader  MessageReader
 	handler    Handler
 }
 
 // Create new connection from conn.
 func newConn(conn net.Conn) *Conn {
 	c := &Conn{
-		conn:          conn,
-		chunkSize:     DefaultChunkSize,
+		conn:      conn,
+		chunkSize: DefaultReadChunkSize,
 	}
 
 	c.epoch = uint32(time.Now().UnixNano() / 1000)
@@ -106,10 +129,7 @@ func newConn(conn net.Conn) *Conn {
 	c.streams = make([]Stream, MaxStreamsNum)
 	c.chunkPool = &sync.Pool{
 		New: func() interface{} {
-			return &ChunkType{
-				buf: make([]byte, c.chunkSize),
-				off: 0,
-			}
+			return newChunk(c.chunkSize)
 		},
 	}
 
@@ -137,16 +157,13 @@ func (c *Conn) SetChunkSize(chunkSize uint32) {
 		c.chunkSize = chunkSize
 		c.chunkPool = &sync.Pool{
 			New: func() interface{} {
-				return &ChunkType{
-					buf: make([]byte, c.chunkSize),
-					off: 0,
-				}
+				return newChunk(c.chunkSize)
 			},
 		}
 	}
 }
 
-func (c *Conn) getChunkSize() uint32 {
+func (c *Conn) getReadChunkSize() uint32 {
 	return c.chunkSize
 }
 
@@ -168,6 +185,7 @@ func (c *Conn) readFull(buf []byte) error {
 		c.inLastAck = c.inBytes
 
 		// TODO: send ack.
+		// c.SendAck(c.inBytes)
 	}
 
 	return nil
@@ -330,12 +348,12 @@ func (c *Conn) pumpMessage() error {
 		}
 	}
 
-	n = min(stm.hdr.mlen - stm.len, c.getChunkSize())
-	ch := c.chunkPool.Get().(*ChunkType)
-	// TODO: ch need to free
+	n = min(stm.hdr.mlen - stm.len, c.getReadChunkSize())
+	ck := c.chunkPool.Get().(*Chunk)
+	// TODO: ck need to free
 
 	// read message body.
-	err = c.readFull((*ch).buf[:n])
+	err = c.readFull(ck.Bytes(n))
 	if err != nil {
 		return err
 	}
@@ -344,7 +362,7 @@ func (c *Conn) pumpMessage() error {
 		stm.msg = newMessage(&stm.hdr)
 	}
 
-	stm.msg.appendChunk(ch)
+	stm.msg.appendChunk(ck)
 	stm.len += n
 
 	if stm.hdr.mlen == stm.len {
@@ -355,5 +373,9 @@ func (c *Conn) pumpMessage() error {
 		return c.handler.Handle(&stm)
 	}
 
+	return nil
+}
+
+func (c *Conn) SendAck(seq uint32) error {
 	return nil
 }
