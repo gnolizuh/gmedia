@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-type MessageType int
+type MessageType uint
 
 const (
 	MessageSetChunkSize MessageType = iota + 1     // 1

@@ -6,6 +6,10 @@ import (
 	"bufio"
 )
 
+type Handler_ interface {
+	ServeRTMP(MessageType, *Peer)
+}
+
 type Server struct {
 	Addr        string
 	ReadTimeout time.Duration
