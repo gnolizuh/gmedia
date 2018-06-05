@@ -31,8 +31,8 @@ const (
 )
 
 type MessageHandler func (*Message) error
-
 type UserMessageHandler func (*Message) error
+type AMFCommandHandler func (*Message) error
 
 // Header declare.
 type Header struct {
@@ -48,13 +48,6 @@ type Header struct {
 var headerSharedPool = sync.Pool{
 	New: func() interface{} {
 		hd := make([]byte, MaxHeaderSize)
-		return &hd
-	},
-}
-
-var sharedBufferPool = sync.Pool{
-	New: func() interface{} {
-		hd := make([]byte, DefaultSendChunkSize)
 		return &hd
 	},
 }
@@ -184,8 +177,10 @@ func (c *Conn) readFull(buf []byte) error {
 	if c.ackWinSize > 0 && c.inBytes - c.inLastAck >= c.ackWinSize {
 		c.inLastAck = c.inBytes
 
-		// TODO: send ack.
-		// c.SendAck(c.inBytes)
+		err := c.SendAck(c.inBytes)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -377,5 +372,21 @@ func (c *Conn) pumpMessage() error {
 }
 
 func (c *Conn) SendAck(seq uint32) error {
+	hdr := &Header{
+		csid: 2,
+		typo: uint8(MessageAck),
+	}
+	msg := newMessage(hdr)
+	msg.alloc(4)
+
+	err := binary.Write(msg, binary.BigEndian, seq)
+	if err != nil {
+		return err
+	}
+
+	msg.prepare(nil)
+
+	// TODO: send message
+
 	return nil
 }
