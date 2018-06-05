@@ -47,6 +47,7 @@ type ServerHandler struct {
 
 	messageHandlers     [MessageMax]MessageHandler
 	userMessageHandlers [UserMessageMax]UserMessageHandler
+	amfHandlers         map[string]AMFCommandHandler
 }
 
 func newServerHandler(conn *Conn) Handler {
@@ -78,6 +79,20 @@ func newServerHandler(conn *Conn) Handler {
 	h.userMessageHandlers[UserMessageStreamIsRecorded] = h.onUserIsRecorded
 	h.userMessageHandlers[UserMessagePingRequest] = h.onUserPingRequest
 	h.userMessageHandlers[UserMessagePingResponse] = h.onUserPingResponse
+
+	h.amfHandlers = make(map[string]AMFCommandHandler)
+	h.amfHandlers["connect"] = h.onCmdConnect
+	h.amfHandlers["releaseStream"] = h.onCmdReleaseStream
+	h.amfHandlers["createStream"] = h.onCmdCreateStream
+	h.amfHandlers["closeStream"] = h.onCmdCloseStream
+	h.amfHandlers["deleteStream"] = h.onCmdDeleteStream
+	h.amfHandlers["FCPublish"] = h.onCmdFCPublish
+	h.amfHandlers["publish"] = h.onCmdPublish
+	h.amfHandlers["play"] = h.onCmdPlay
+	h.amfHandlers["play2"] = h.onCmdPlay2
+	h.amfHandlers["seek"] = h.onCmdSeek
+	h.amfHandlers["pause"] = h.onCmdPause
+	h.amfHandlers["pauseraw"] = h.onCmdPause
 
 	return h
 }
@@ -207,16 +222,21 @@ func (sh *ServerHandler) onAmf0Shared(msg *Message) error {
 
 func (sh *ServerHandler) onAmf0Cmd(msg *Message) error {
 	var name string
-	var tran int
-	err := amf.DecodeWithReader(msg, &name, &tran)
+	err := amf.DecodeWithReader(msg, &name)
 	if err != nil {
 		log.Println(err)
 		return err
 	}
 
-	log.Printf("receive amf0 command: name=%s tran=%d\n", name, tran)
+	log.Printf("receive AMF0 command: name=%s\n", name)
 
-	return nil
+	h, ok := sh.amfHandlers[name]
+	if !ok {
+		log.Printf("AMF command '%s' no handler", name)
+		return nil
+	}
+
+	return h(msg)
 }
 
 func (sh *ServerHandler) onAggregate(msg *Message) error {
@@ -306,5 +326,147 @@ func (sh *ServerHandler) onUserPingResponse(msg *Message) error {
 
 	// TODO: reset next ping request.
 
+	return nil
+}
+
+func (sh *ServerHandler) onCmdConnect(msg *Message) error {
+	var cmd ConnectCommand
+	err := amf.DecodeWithReader(msg, &cmd.Trans, &cmd.Object)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	// TODO: send AckSize and _result
+	log.Println(cmd)
+
+	return nil
+}
+
+func (sh *ServerHandler) onCmdReleaseStream(msg *Message) error {
+	var cmd ReleaseStreamCommand
+	var null int
+	err := amf.DecodeWithReader(msg, &cmd.Trans, &null, &cmd.Name)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Println(cmd)
+	return nil
+}
+
+func (sh *ServerHandler) onCmdCreateStream(msg *Message) error {
+	var cmd CreateStreamCommand
+	err := amf.DecodeWithReader(msg, &cmd.Trans)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Println(cmd)
+	return nil
+}
+
+func (sh *ServerHandler) onCmdCloseStream(msg *Message) error {
+	var cmd CloseStreamCommand
+	err := amf.DecodeWithReader(msg, &cmd.Stream)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Println(cmd)
+	return nil
+}
+
+func (sh *ServerHandler) onCmdDeleteStream(msg *Message) error {
+	var cmd DeleteStreamCommand
+	var null int
+	err := amf.DecodeWithReader(msg, &null, &null, &cmd.Stream)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Println(cmd)
+	return nil
+}
+
+func (sh *ServerHandler) onCmdFCPublish(msg *Message) error {
+	var cmd FCPublishCommand
+	var null int
+	err := amf.DecodeWithReader(msg, &cmd.Trans, &null, &cmd.Name)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Println(cmd)
+	return nil
+}
+
+func (sh *ServerHandler) onCmdPublish(msg *Message) error {
+	var cmd PublishCommand
+	var null int
+	err := amf.DecodeWithReader(msg, &null, &null, &cmd.Name, &cmd.Type)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Println(cmd)
+	return nil
+}
+
+func (sh *ServerHandler) onCmdPlay(msg *Message) error {
+	var cmd PlayCommand
+	var null int
+	err := amf.DecodeWithReader(msg, &null, &null, &cmd.Name, &cmd.Start, &cmd.Duration, &cmd.Reset)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Println(cmd)
+	return nil
+}
+
+func (sh *ServerHandler) onCmdPlay2(msg *Message) error {
+	var cmd Play2Command
+	var null int
+	err := amf.DecodeWithReader(msg, &null, &null, &cmd)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Println(cmd)
+	return nil
+}
+
+func (sh *ServerHandler) onCmdSeek(msg *Message) error {
+	var cmd SeekCommand
+	var null int
+	err := amf.DecodeWithReader(msg, &null, &null, &cmd.Offset)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Println(cmd)
+	return nil
+}
+
+func (sh *ServerHandler) onCmdPause(msg *Message) error {
+	var cmd PauseCommand
+	var null int
+	err := amf.DecodeWithReader(msg, &null, &null, &cmd.Pause, &cmd.Position)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	log.Println(cmd)
 	return nil
 }

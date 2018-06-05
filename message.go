@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"sync"
 )
 
 type MessageType int
@@ -97,6 +98,13 @@ func messageType(typo uint8) string {
 	} else {
 		return "?"
 	}
+}
+
+var sharedBufferPool = sync.Pool{
+	New: func() interface{} {
+		hd := make([]byte, DefaultSendChunkSize)
+		return &hd
+	},
 }
 
 // RTMP message chunk declare.
@@ -284,62 +292,77 @@ func (cl ChunkList) Size() (uint32) {
 
 // RTMP message declare.
 type Message struct {
-	hdr    *Header
-	body   *ChunkList
+	hdr  *Header
+	cl   *ChunkList
 }
 
 func newMessage(hdr *Header) *Message {
 	msg := Message {
 		hdr: hdr,
-		body: newChunkList(),
+		cl: newChunkList(),
 	}
 	return &msg
 }
 
 func (m *Message) appendChunk(ck *Chunk) {
-	m.body.appendChunk(ck)
+	m.cl.appendChunk(ck)
 }
 
 func (m *Message) Read(p []byte) (int, error) {
-	return m.body.Read(p)
+	return m.cl.Read(p)
 }
 
 func (m *Message) ReadByte() (byte, error) {
-	return m.body.ReadByte()
+	return m.cl.ReadByte()
 }
 
-func (m *Message) prepare(hdr *Header) error {
+func (m *Message) Write(p []byte) (int, error) {
+	return m.cl.Write(p)
+}
+
+func (m *Message) WriteByte(c byte) error {
+	return m.cl.WriteByte(c)
+}
+
+func (m *Message) alloc(n uint32) {
+	for i := (n / DefaultSendChunkSize) + 1; i > 0; i-- {
+		ck := sharedBufferPool.Get().(*Chunk)
+		m.appendChunk(ck)
+	}
+}
+
+func (m *Message) prepare(prev *Header) error {
 	hdrsize := []uint8{12, 8, 4, 1}
 
 	if m.hdr.csid > MaxStreamsNum {
 		return errors.New(fmt.Sprintf("RTMP out chunk stream too big: %d >= %d", m.hdr.csid, MaxStreamsNum))
 	}
 
-	mlen := m.body.Size()
+	size := m.cl.Size()
 	timestamp := m.hdr.timestamp
 
 	ft := uint8(0)
-	if hdr != nil && hdr.csid > 0 && hdr.msid == m.hdr.msid {
+	if prev != nil && prev.csid > 0 && m.hdr.msid == prev.msid {
 		ft++
-		if hdr.typo == m.hdr.typo && mlen > 0 && mlen == m.hdr.mlen {
+		if m.hdr.typo == prev.typo && size > 0 && size == prev.mlen {
 			ft++
-			if hdr.timestamp == m.hdr.timestamp {
+			if m.hdr.timestamp == prev.timestamp {
 				ft++
 			}
 		}
-		timestamp = m.hdr.timestamp - hdr.timestamp
+		timestamp = m.hdr.timestamp - prev.timestamp
 	}
 
-	if hdr != nil {
-        *hdr = *m.hdr
-		hdr.mlen = mlen
-    }
+	if prev != nil {
+		*prev = *m.hdr
+		prev.mlen = size
+	}
 
 	hsize := hdrsize[ft]
 
 	log.Printf("RTMP prep %s (%d) fmt=%d csid=%d timestamp=%d mlen=%d msid=%d",
-		messageType(hdr.typo), hdr.typo, ft,
-		hdr.csid, timestamp, hdr.mlen, hdr.msid)
+		messageType(prev.typo), prev.typo, ft,
+		prev.csid, timestamp, prev.mlen, prev.msid)
 
 	exttime := uint32(0)
 	if timestamp >= 0x00ffffff {
@@ -355,43 +378,62 @@ func (m *Message) prepare(hdr *Header) error {
 		}
 	}
 
-	fch := m.body.chs[0]
+	fch := m.cl.chs[0]
 	fch.head -= uint32(hsize)
+	head := fch.head
 
-	// basic header
-	thsize := uint32(0)
+	var ftsize uint32
 	ftt := ft << 6
 	if m.hdr.csid >= 2 && m.hdr.csid <= 63 {
-		fch.buf[fch.head] = ftt | (uint8(m.hdr.csid) & 0x3f)
-		thsize = 1
+		fch.buf[head] = ftt | (uint8(m.hdr.csid) & 0x3f)
+		ftsize = 1
 	} else if m.hdr.csid >= 64 &&  m.hdr.csid < 320 {
-		fch.buf[fch.head] = ftt
-		fch.buf[fch.head+1] = uint8(m.hdr.csid - 64)
-		thsize = 2
+		fch.buf[head] = ftt
+		fch.buf[head+1] = uint8(m.hdr.csid - 64)
+		ftsize = 2
 	} else {
-		fch.buf[fch.head] = ftt | 0x01
-		fch.buf[fch.head+1] = uint8(m.hdr.csid - 64)
-		fch.buf[fch.head+2] = uint8(m.hdr.csid - 64) >> 8
-		thsize = 3
+		fch.buf[head] = ftt | 0x01
+		fch.buf[head+1] = uint8(m.hdr.csid - 64)
+		fch.buf[head+2] = uint8(m.hdr.csid - 64) >> 8
+		ftsize = 3
 	}
 
-	// TODO: message header
+	head += ftsize
 	if ft <= 2 {
+		fch.buf[head]   = byte(timestamp >> 16)
+		fch.buf[head+1] = byte(timestamp >> 8)
+		fch.buf[head+2] = byte(timestamp)
+		head += 3
 		if ft <= 1 {
+			fch.buf[head]   = byte(size >> 16)
+			fch.buf[head+1] = byte(size >> 8)
+			fch.buf[head+2] = byte(size)
+			fch.buf[head+3] = m.hdr.typo
+			head += 4
 			if ft == 0 {
+				fch.buf[head]   = byte(m.hdr.msid >> 24)
+				fch.buf[head+1] = byte(m.hdr.msid >> 16)
+				fch.buf[head+2] = byte(m.hdr.msid >> 8)
+				fch.buf[head+3] = byte(m.hdr.msid)
+				head += 4
 			}
 		}
 	}
 
-	// TODO: extend timestamp
+	// extend timestamp
 	if exttime > 0 {
+		fch.buf[head]   = byte(exttime >> 24)
+		fch.buf[head+1] = byte(exttime >> 16)
+		fch.buf[head+2] = byte(exttime >> 8)
+		fch.buf[head+3] = byte(exttime)
 	}
 
-	for i := m.body.offw; i < m.body.has; i++ {
-		ch := m.body.chs[m.body.offw]
-		ch.head -= thsize
+	// set following chunk's fmt to be 3
+	for i := m.cl.offw+1; i < m.cl.has; i++ {
+		ch := m.cl.chs[i]
+		ch.head -= ftsize
 		ch.buf[ch.head] = uint8(fch.buf[fch.head] | 0xc0)
-		copy(ch.buf[ch.head:], fch.buf[fch.head+1:thsize-1])
+		copy(ch.buf[ch.head+1:ch.head+ftsize], fch.buf[fch.head+1:fch.head+ftsize])
 	}
 
 	return nil

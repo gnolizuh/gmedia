@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"encoding/binary"
 	"encoding/base64"
+	"strings"
 )
 
 type IOReader interface {
@@ -176,13 +177,17 @@ func (d *decodeState) decodeObjectName() (string, error) {
 		return "", err
 	}
 
-	s := make([]byte, u)
-	_, err = d.r.Read(s)
-	if err != nil {
-		return "", err
+	if u > 0 {
+		s := make([]byte, u)
+		_, err = d.r.Read(s)
+		if err != nil {
+			return "", err
+		}
+
+		return string(s), nil
 	}
 
-	return string(s), nil
+	return "", nil
 }
 
 func (d *decodeState) stringInterface() interface{} {
@@ -241,10 +246,10 @@ func (d *decodeState) decodeString(v reflect.Value) error {
 func (d *decodeState) field(s string, t reflect.Type) (reflect.StructField, bool) {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if f.Name == s {
+		if f.Tag.Get("amf") == s {
 			return f, true
 		}
-		if f.Tag.Get("amf.name") == s {
+		if strings.EqualFold(f.Name, s) {
 			return f, true
 		}
 	}
