@@ -37,7 +37,7 @@ type ServeHandler interface {
 	ServeCommand(CommandName) error
 }
 
-type MessageHandler func (*Message) error
+type MessageHandler func (*Conn, *Message) error
 type UserMessageHandler func (*Message) error
 type AMFCommandHandler func (*Message) error
 
