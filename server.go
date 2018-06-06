@@ -3,23 +3,31 @@ package rtmp
 import (
 	"net"
 	"time"
-	"bufio"
+	"errors"
 )
 
-type Handler_ interface {
-	ServeRTMP(MessageType, *Peer)
+type ServeState uint
+
+const (
+	ServeError ServeState = iota
+	ServeDeclined
+)
+
+type Handler interface {
+	ServeNew(*Peer) ServeState
+	ServeMessage(MessageType, *Peer) ServeState
+	ServeUserMessage(UserMessageType, *Peer) ServeState
+	ServeCommand(CommandName, *Peer) ServeState
 }
 
 type Server struct {
 	Addr        string
 	ReadTimeout time.Duration
+	Handler     Handler
 }
 
-func ListenAndServe(addr string) error {
-	server := &Server{
-		Addr: addr,
-	}
-
+func ListenAndServe(addr string, handler Handler) error {
+	server := &Server{Addr: addr, Handler: handler}
 	return server.ListenAndServe()
 }
 
@@ -49,35 +57,58 @@ func (srv *Server) Serve(l net.Listener) error {
 		c := newConn(rw)
 
 		// Set connection state.
-		c.state = StateServerRecvChallenge
-		c.handler = newServerHandler(c)
+		c.setState(StateServerRecvChallenge)
+		c.handler = &serverHandler{ srv: srv, c: c }
 
 		go c.serve()
 	}
 }
 
-func (srv *Server) OnUserControl(event uint16, reader *bufio.Reader) error {
+type serverHandler struct {
+	srv *Server
+	c   *Conn
+}
+
+func (sh *serverHandler) ServeNew() error {
+	h := sh.srv.Handler
+	if h != nil {
+		if h.ServeNew(&sh.c.peer) != ServeDeclined {
+			return errors.New("ServeNew: serve peer failed")
+		}
+	}
 	return nil
 }
 
-func (srv *Server) OnEdge() error {
+func (sh *serverHandler) ServeMessage(typo MessageType) error {
+	h := sh.srv.Handler
+	if h != nil {
+		if h.ServeMessage(typo, &sh.c.peer) != ServeDeclined {
+			return errors.New("ServeMessage: serve peer failed")
+		}
+	}
 	return nil
 }
 
-func (srv *Server) OnAudio() error {
+func (sh *serverHandler) ServeUserMessage(typo UserMessageType) error {
+	if sh.srv.Handler != nil {
+		sh.srv.Handler.ServeUserMessage(typo, &sh.c.peer)
+	}
 	return nil
 }
 
-func (srv *Server) OnVideo() error {
+func (sh *serverHandler) ServeCommand(name CommandName) error {
+	if sh.srv.Handler != nil {
+		sh.srv.Handler.ServeCommand(name, &sh.c.peer)
+	}
 	return nil
 }
 
-func (srv *Server) OnAmf() error {
-	return nil
+var serverMessageHandler = messageHandler{
+
 }
 
-func (srv *Server) OnAggregate() error {
-	return nil
+type messageHandler struct {
+
 }
 
 type tcpKeepAliveListener struct {

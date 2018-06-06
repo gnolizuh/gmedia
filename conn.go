@@ -30,6 +30,13 @@ const (
 	MaxStreamsNum = 32
 )
 
+type ServeHandler interface {
+	ServeNew() error
+	ServeMessage(MessageType) error
+	ServeUserMessage(UserMessageType) error
+	ServeCommand(CommandName) error
+}
+
 type MessageHandler func (*Message) error
 type UserMessageHandler func (*Message) error
 type AMFCommandHandler func (*Message) error
@@ -40,7 +47,7 @@ type Header struct {
 	csid      uint32
 	timestamp uint32
 	mlen      uint32
-	typo      uint8   // typo means type, u know why.
+	typo      MessageType   // typo means type, u know why.
 	msid      uint32
 }
 
@@ -81,7 +88,7 @@ type Conn struct {
 	incomingEpoch uint32
 
 	// State and digest be used in RTMP handshake.
-	state      int
+	state      HandshakeState
 	digest     []byte
 
 	// Read and write buffer.
@@ -103,8 +110,11 @@ type Conn struct {
 	inBytes    uint32
 	inLastAck  uint32
 
+	// peer wrapper
+	peer       Peer
+
 	// message callback function.
-	handler    Handler
+	handler    ServeHandler
 }
 
 // Create new connection from conn.
@@ -126,7 +136,15 @@ func newConn(conn net.Conn) *Conn {
 		},
 	}
 
+	c.peer = Peer{
+		RemoteAddr: c.conn.RemoteAddr().String(),
+	}
+
 	return c
+}
+
+func (c *Conn) setState(state HandshakeState) {
+	c.state = state
 }
 
 // Serve a new connection.
@@ -134,13 +152,23 @@ func (c *Conn) serve() {
 	err := c.handshake()
 	if err != nil {
 		return
+	} else {
+		err := c.handler.ServeNew()
+		if err != nil {
+			return
+		}
 	}
 
 	for {
-		err := c.pumpMessage()
+		msg, err := c.pumpMessage()
 		if err != nil {
 			log.Println(err)
 			return
+		} else {
+			err := c.handler.ServeMessage(msg.hdr.typo)
+			if err != nil {
+				return
+			}
 		}
 	}
 }
@@ -271,7 +299,7 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 			}
 			hdr.mlen = uint32(b[off+2]) | uint32(b[off+1])<<8 | uint32(b[off])<<16
 			off += 3
-			hdr.typo = uint8(b[off])
+			hdr.typo = MessageType(b[off])
 			off += 1
 
 			if hdr.fmt == 0 {
@@ -297,7 +325,7 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	return off, nil
 }
 
-func (c *Conn) pumpMessage() error {
+func (c *Conn) pumpMessage() (*Message, error) {
 	hdr := Header{}
 
 	// alloc shared buffer.
@@ -310,18 +338,18 @@ func (c *Conn) pumpMessage() error {
 	// read basic header.
 	n, err := c.readBasicHeader(p, &hdr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	p = p[n:]
 
 	if hdr.csid > MaxStreamsNum {
-		return errors.New(fmt.Sprintf("RTMP in chunk stream too big: %d >= %d", hdr.csid, MaxStreamsNum))
+		return nil, errors.New(fmt.Sprintf("RTMP in chunk stream too big: %d >= %d", hdr.csid, MaxStreamsNum))
 	}
 
 	// read chunk message header.
 	_, err = c.readChunkMessageHeader(p, &hdr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// indicate timestamp whether is absolute or relate.
@@ -350,7 +378,7 @@ func (c *Conn) pumpMessage() error {
 	// read message body.
 	err = c.readFull(ck.Bytes(n))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if stm.msg == nil {
@@ -361,20 +389,19 @@ func (c *Conn) pumpMessage() error {
 	stm.len += n
 
 	if stm.hdr.mlen == stm.len {
-		if hdr.typo >= uint8(MessageMax) {
-			return errors.New(fmt.Sprintf("unexpected RTMP message type: %d", hdr.typo))
+		if hdr.typo >= MessageMax {
+			return nil, errors.New(fmt.Sprintf("unexpected RTMP message type: %d", hdr.typo))
 		}
-
-		return c.handler.Handle(&stm)
+		return stm.msg, nil
+	} else {
+		return nil, errors.New(fmt.Sprintf("unexpected RTMP message len: %d", stm.len))
 	}
-
-	return nil
 }
 
 func (c *Conn) SendAck(seq uint32) error {
 	hdr := &Header{
 		csid: 2,
-		typo: uint8(MessageAck),
+		typo: MessageAck,
 	}
 	msg := newMessage(hdr)
 	msg.alloc(4)

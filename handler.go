@@ -9,7 +9,7 @@ import (
 	"github.com/gnolizuh/rtmp/amf"
 )
 
-type Handler interface {
+type MyHandler interface {
 	Handle (*Stream) error
 }
 
@@ -50,7 +50,7 @@ type ServerHandler struct {
 	amfHandlers         map[string]AMFCommandHandler
 }
 
-func newServerHandler(conn *Conn) Handler {
+func newServerHandler(conn *Conn) MyHandler {
 	h := &ServerHandler{
 		conn: conn,
 	}
@@ -147,7 +147,7 @@ func (sh *ServerHandler) onUserControl(msg *Message) error {
 		return err
 	}
 
-	if evt >= UserMessageMax {
+	if UserMessageType(evt) >= UserMessageMax {
 		return errors.New(fmt.Sprintf("user message type out of range: %d", evt))
 	}
 

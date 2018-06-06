@@ -70,8 +70,10 @@ var (
 	HandshakeResponseSize = HandshakeChallengeSize - 1
 )
 
+type HandshakeState uint
+
 const (
-	StateServerRecvChallenge int = iota
+	StateServerRecvChallenge HandshakeState = iota
 	StateServerSendChallenge
 	StateServerRecvResponse
 	StateServerSendResponse
@@ -85,7 +87,6 @@ const (
 )
 
 func makeDigest(b, key []byte, offs uint32) ([]byte, error) {
-
 	h := hmac.New(sha256.New, key)
 	if offs > 0 {
 		if _, err := h.Write(b[:offs]); err != nil {
