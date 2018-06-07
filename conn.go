@@ -31,15 +31,13 @@ const (
 )
 
 type ServeHandler interface {
-	ServeNew() error
-	ServeMessage(MessageType) error
-	ServeUserMessage(UserMessageType) error
-	ServeCommand(CommandName) error
+	serveNew(*Peer) error
+	serveMessage(MessageType, *Peer) error
 }
 
-type MessageHandler func (*Conn, *Message) error
-type UserMessageHandler func (*Message) error
-type AMFCommandHandler func (*Message) error
+type MessageHandler func (*Peer) error
+type UserMessageHandler func (*Peer) error
+type AMFCommandHandler func (*Peer) error
 
 // Header declare.
 type Header struct {
@@ -138,6 +136,7 @@ func newConn(conn net.Conn) *Conn {
 
 	c.peer = Peer{
 		RemoteAddr: c.conn.RemoteAddr().String(),
+		Conn: c,
 	}
 
 	return c
@@ -149,11 +148,12 @@ func (c *Conn) setState(state HandshakeState) {
 
 // Serve a new connection.
 func (c *Conn) serve() {
+	peer := &c.peer
 	err := c.handshake()
 	if err != nil {
 		return
 	} else {
-		err := c.handler.ServeNew()
+		err := c.handler.serveNew(peer)
 		if err != nil {
 			return
 		}
@@ -165,7 +165,8 @@ func (c *Conn) serve() {
 			log.Println(err)
 			return
 		} else {
-			err := c.handler.ServeMessage(msg.hdr.typo)
+			peer.setReader(msg)
+			err := c.handler.serveMessage(msg.hdr.typo, peer)
 			if err != nil {
 				return
 			}

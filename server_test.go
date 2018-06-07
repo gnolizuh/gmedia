@@ -18,7 +18,7 @@ func (st *ServerTest) ServeUserMessage(typo UserMessageType, peer *Peer) ServeSt
 	return ServeDeclined
 }
 
-func (st *ServerTest) ServeCommand(name CommandName, peer *Peer) ServeState {
+func (st *ServerTest) ServeCommand(name string, peer *Peer) ServeState {
 	return ServeDeclined
 }
 

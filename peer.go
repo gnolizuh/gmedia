@@ -8,4 +8,19 @@ type Peer struct {
 	//
 	// This field is ignored by the RTMP client.
 	RemoteAddr string
+
+	// Message is the RTMP message reader.
+	//
+	// Peer always carry out last message sent from remote peer.
+	Reader Reader
+
+	// Conn
+	Conn *Conn
+
+	// Handler
+	handler Handler
+}
+
+func (p *Peer) setReader(reader Reader) {
+	p.Reader = reader
 }

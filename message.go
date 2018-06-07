@@ -6,7 +6,16 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"encoding/binary"
 )
+
+type Reader interface {
+	Read(b []byte) (int, error)
+	ReadByte() (byte, error)
+	ReadUint32() (uint32, error)
+	ReadUint16() (uint16, error)
+	ReadUint8() (uint8, error)
+}
 
 type MessageType uint
 
@@ -308,6 +317,35 @@ func (m *Message) Read(p []byte) (int, error) {
 
 func (m *Message) ReadByte() (byte, error) {
 	return m.cl.ReadByte()
+}
+
+func (m *Message) ReadUint32() (uint32, error) {
+	var b uint32
+	err := binary.Read(m, binary.BigEndian, &b)
+	if err != nil {
+		return 0, err
+	}
+
+	return b, nil
+}
+
+func (m *Message) ReadUint16() (uint16, error) {
+	var b uint16
+	err := binary.Read(m, binary.BigEndian, &b)
+	if err != nil {
+		return 0, err
+	}
+
+	return b, nil
+}
+
+func (m *Message) ReadUint8() (uint8, error) {
+	b, err := m.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+
+	return uint8(b), nil
 }
 
 func (m *Message) Write(p []byte) (int, error) {
