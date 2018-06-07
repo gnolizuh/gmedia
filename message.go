@@ -105,8 +105,7 @@ func messageType(typo MessageType) string {
 
 var sharedBufferPool = sync.Pool{
 	New: func() interface{} {
-		hd := make([]byte, DefaultSendChunkSize)
-		return &hd
+		return newChunk(DefaultSendChunkSize)
 	},
 }
 
@@ -124,10 +123,10 @@ type Chunk struct {
 
 func newChunk(cs uint32) *Chunk {
 	return &Chunk{
-		buf: make([]byte, cs + MaxMessageHeaderSize),
-		offr: MaxMessageHeaderSize,
-		offw: MaxMessageHeaderSize,
-		head: MaxMessageHeaderSize,
+		buf: make([]byte, cs + MaxHeaderSize),
+		offr: MaxHeaderSize,
+		offw: MaxHeaderSize,
+		head: MaxHeaderSize,
 	}
 }
 
@@ -190,6 +189,7 @@ type ChunkList struct {
 
 	// for reading
 	offr uint32
+
 	// for writing
 	offw uint32
 }
@@ -295,14 +295,16 @@ func (cl ChunkList) Size() (uint32) {
 
 // RTMP message declare.
 type Message struct {
-	hdr  *Header
-	cl   *ChunkList
+	hdr   *Header
+	cl    *ChunkList
+	ready bool
 }
 
 func newMessage(hdr *Header) *Message {
 	msg := Message {
 		hdr: hdr,
 		cl: newChunkList(),
+		ready: false,
 	}
 	return &msg
 }
@@ -366,6 +368,11 @@ func (m *Message) alloc(n uint32) {
 func (m *Message) prepare(prev *Header) error {
 	hdrsize := []uint8{12, 8, 4, 1}
 
+	// message whether was prepared or not
+	if m.ready {
+		return nil
+	}
+
 	if m.hdr.csid > MaxStreamsNum {
 		return errors.New(fmt.Sprintf("RTMP out chunk stream too big: %d >= %d", m.hdr.csid, MaxStreamsNum))
 	}
@@ -393,8 +400,8 @@ func (m *Message) prepare(prev *Header) error {
 	hsize := hdrsize[ft]
 
 	log.Printf("RTMP prep %s (%d) fmt=%d csid=%d timestamp=%d mlen=%d msid=%d",
-		messageType(prev.typo), prev.typo, ft,
-		prev.csid, timestamp, prev.mlen, prev.msid)
+		messageType(m.hdr.typo), m.hdr.typo, ft,
+		m.hdr.csid, timestamp, size, m.hdr.msid)
 
 	exttime := uint32(0)
 	if timestamp >= 0x00ffffff {
@@ -467,6 +474,8 @@ func (m *Message) prepare(prev *Header) error {
 		ch.buf[ch.head] = uint8(fch.buf[fch.head] | 0xc0)
 		copy(ch.buf[ch.head+1:ch.head+ftsize], fch.buf[fch.head+1:fch.head+ftsize])
 	}
+
+	m.ready = true
 
 	return nil
 }
