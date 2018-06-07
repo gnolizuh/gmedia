@@ -9,6 +9,10 @@ import (
 	"github.com/gnolizuh/rtmp/amf"
 )
 
+const (
+	DefaultAckWindowSize = 5000000
+)
+
 type ServeState uint
 
 type tcpKeepAliveListener struct {
@@ -35,7 +39,10 @@ type Server struct {
 }
 
 func ListenAndServe(addr string, handler Handler) error {
-	server := &Server{Addr: addr, Handler: handler}
+	server := &Server{
+		Addr: addr,
+		Handler: handler,
+	}
 	return server.ListenAndServe()
 }
 
@@ -421,6 +428,8 @@ func serveConnect(peer *Peer) error {
 
 	// TODO: send AckSize and _result
 	log.Println(&obj)
+
+	peer.Conn.SendAckWinSize(DefaultAckWindowSize)
 
 	return nil
 }

@@ -22,6 +22,10 @@ const (
 	// Extended Timestamp (0 or 4 bytes)
 	MaxExtendHeaderSize = 4
 
+	// Chunk header:
+    //   max 3  basic header
+    // + max 11 message header
+    // + max 4  extended header (timestamp)
 	MaxHeaderSize = MaxBasicHeaderSize + MaxMessageHeaderSize + MaxExtendHeaderSize
 
 	DefaultReadChunkSize = 128
@@ -415,6 +419,30 @@ func (c *Conn) SendAck(seq uint32) error {
 	msg.prepare(nil)
 
 	// TODO: send message
+	ck := msg.cl.chs[0]
+	c.conn.Write(ck.buf[ck.head:ck.offw])
+
+	return nil
+}
+
+func (c *Conn) SendAckWinSize(win uint32) error {
+	hdr := &Header{
+		csid: 2,
+		typo: MessageWindowAckSize,
+	}
+	msg := newMessage(hdr)
+	msg.alloc(4)
+
+	err := binary.Write(msg, binary.BigEndian, win)
+	if err != nil {
+		return err
+	}
+
+	msg.prepare(nil)
+
+	// TODO: send message
+	ck := msg.cl.chs[0]
+	c.conn.Write(ck.buf[ck.head:ck.offw])
 
 	return nil
 }
