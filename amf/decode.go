@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-type IOReader interface {
+type Reader interface {
 	Read(b []byte) (int, error)
 	ReadByte() (byte, error)
 }
@@ -45,7 +45,12 @@ func (e *DecodeTypeError) Error() string {
 }
 
 type decodeState struct {
-	r IOReader
+	r    Reader
+	skip bool
+}
+
+func (d *decodeState) reset() {
+	d.skip = false
 }
 
 func (d *decodeState) indirect(v reflect.Value) reflect.Value {
@@ -100,23 +105,25 @@ func (d *decodeState) decodeFloat64(v reflect.Value) error {
 		return err
 	}
 
-	v = d.indirect(v)
+	if !d.skip {
+		v = d.indirect(v)
 
-	switch v.Kind() {
-	default:
-		if v.Kind() == reflect.String && v.Type() == numberType {
-			v.SetString(strconv.FormatFloat(f, 'f', 6, 64))
-			break
+		switch v.Kind() {
+		default:
+			if v.Kind() == reflect.String && v.Type() == numberType {
+				v.SetString(strconv.FormatFloat(f, 'f', 6, 64))
+				break
+			}
+			return errors.New("unexpected kind (" + v.Type().String() + ") when decoding float64")
+		case reflect.Float32, reflect.Float64:
+			v.SetFloat(f)
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			v.SetInt(int64(f))
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			v.SetUint(uint64(f))
+		case reflect.Interface:
+			v.Set(reflect.ValueOf(f))
 		}
-		return errors.New("unexpected kind (" + v.Type().String() + ") when decoding float64")
-	case reflect.Float32, reflect.Float64:
-		v.SetFloat(f)
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		v.SetInt(int64(f))
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		v.SetUint(uint64(f))
-	case reflect.Interface:
-		v.Set(reflect.ValueOf(f))
 	}
 
 	return nil
@@ -137,17 +144,19 @@ func (d *decodeState) decodeBool(v reflect.Value) error {
 		return err
 	}
 
-	b := bt != 0
+	if !d.skip {
+		b := bt != 0
 
-	v = d.indirect(v)
+		v = d.indirect(v)
 
-	switch v.Kind() {
-	default:
-		return errors.New("unexpected kind (" + v.Type().String() + ") when decoding bool")
-	case reflect.Bool:
-		v.SetBool(b)
-	case reflect.Interface:
-		v.Set(reflect.ValueOf(b))
+		switch v.Kind() {
+		default:
+			return errors.New("unexpected kind (" + v.Type().String() + ") when decoding bool")
+		case reflect.Bool:
+			v.SetBool(b)
+		case reflect.Interface:
+			v.Set(reflect.ValueOf(b))
+		}
 	}
 
 	return nil
@@ -219,25 +228,27 @@ func (d *decodeState) decodeString(v reflect.Value) error {
 		return err
 	}
 
-	v = d.indirect(v)
+	if !d.skip {
+		v = d.indirect(v)
 
-	switch v.Kind() {
-	default:
-		return errors.New("unexpected type: " + v.Type().String() + " decoding string")
-	case reflect.Slice:
-		if v.Type().Elem().Kind() != reflect.Uint8 {
-			return &DecodeTypeError{Value: "string", Type: v.Type()}
+		switch v.Kind() {
+		default:
+			return errors.New("unexpected type: " + v.Type().String() + " decoding string")
+		case reflect.Slice:
+			if v.Type().Elem().Kind() != reflect.Uint8 {
+				return &DecodeTypeError{Value: "string", Type: v.Type()}
+			}
+			b := make([]byte, base64.StdEncoding.DecodedLen(len(s)))
+			n, err := base64.StdEncoding.Decode(b, s)
+			if err != nil {
+				return err
+			}
+			v.SetBytes(b[:n])
+		case reflect.String:
+			v.SetString(string(s))
+		case reflect.Interface:
+			v.Set(reflect.ValueOf(string(s)))
 		}
-		b := make([]byte, base64.StdEncoding.DecodedLen(len(s)))
-		n, err := base64.StdEncoding.Decode(b, s)
-		if err != nil {
-			return err
-		}
-		v.SetBytes(b[:n])
-	case reflect.String:
-		v.SetString(string(s))
-	case reflect.Interface:
-		v.Set(reflect.ValueOf(string(s)))
 	}
 
 	return nil
@@ -290,30 +301,32 @@ func (d *decodeState) objectInterface() map[string]interface{} {
 // - loop encoded string followed by encoded value
 // - terminated with empty string followed by 1 byte 0x09
 func (d *decodeState) decodeObject(v reflect.Value) error {
-	if v.Kind() == reflect.Interface && v.NumMethod() == 0 {
-		v.Set(reflect.ValueOf(d.objectInterface()))
-		return nil
-	}
+	if !d.skip {
+		if v.Kind() == reflect.Interface && v.NumMethod() == 0 {
+			v.Set(reflect.ValueOf(d.objectInterface()))
+			return nil
+		}
 
-	v = d.indirect(v)
+		v = d.indirect(v)
 
-	switch v.Kind() {
-	case reflect.Map:
-		t := v.Type()
-		switch t.Key().Kind() {
-		case reflect.String,
-			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		switch v.Kind() {
+		case reflect.Map:
+			t := v.Type()
+			switch t.Key().Kind() {
+			case reflect.String,
+				reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+				reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			default:
+				return errors.New("unexpected map key type, found: " + t.Key().String())
+			}
+			if v.IsNil() {
+				v.Set(reflect.MakeMap(t))
+			}
+		case reflect.Struct:
+			// ok
 		default:
-			return errors.New("unexpected map key type, found: " + t.Key().String())
+			return &DecodeTypeError{Value: "object", Type: v.Type()}
 		}
-		if v.IsNil() {
-			v.Set(reflect.MakeMap(t))
-		}
-	case reflect.Struct:
-		// ok
-	default:
-		return &DecodeTypeError{Value: "object", Type: v.Type()}
 	}
 
 	var mapElem reflect.Value
@@ -339,21 +352,23 @@ func (d *decodeState) decodeObject(v reflect.Value) error {
 
 		var subv reflect.Value
 
-		if v.Kind() == reflect.Map {
-			elemType := v.Type().Elem()
-			if !mapElem.IsValid() {
-				mapElem = reflect.New(elemType).Elem()
+		if !d.skip {
+			if v.Kind() == reflect.Map {
+				elemType := v.Type().Elem()
+				if !mapElem.IsValid() {
+					mapElem = reflect.New(elemType).Elem()
+				} else {
+					mapElem.Set(reflect.Zero(elemType))
+				}
+				subv = mapElem
 			} else {
-				mapElem.Set(reflect.Zero(elemType))
+				f, ok := d.field(on, v.Type())
+				if ok {
+					subv = v.FieldByName(f.Name)
+				} else {
+					d.skip = true
+				}
 			}
-			subv = mapElem
-		} else {
-			f, ok := d.field(on, v.Type())
-			if !ok {
-				return errors.New("object name (" + on + ") not found in " + v.Type().String())
-			}
-
-			subv = v.FieldByName(f.Name)
 		}
 
 		err = d.decodeValue(subv)
@@ -361,33 +376,35 @@ func (d *decodeState) decodeObject(v reflect.Value) error {
 			return err
 		}
 
-		if v.Kind() == reflect.Map {
-			kt := v.Type().Key()
-			var kv reflect.Value
-			switch {
-			case kt.Kind() == reflect.String:
-				kv = reflect.ValueOf(on).Convert(kt)
-			default:
-				switch kt.Kind() {
-				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					s := string(on)
-					n, err := strconv.ParseInt(s, 10, 64)
-					if err != nil || reflect.Zero(kt).OverflowInt(n) {
-						return &DecodeTypeError{Value: "number " + s, Type: kt}
-					}
-					kv = reflect.ValueOf(n).Convert(kt)
-				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-					s := string(on)
-					n, err := strconv.ParseUint(s, 10, 64)
-					if err != nil || reflect.Zero(kt).OverflowUint(n) {
-						return &DecodeTypeError{Value: "number " + s, Type: kt}
-					}
-					kv = reflect.ValueOf(n).Convert(kt)
+		if !d.skip {
+			if v.Kind() == reflect.Map {
+				kt := v.Type().Key()
+				var kv reflect.Value
+				switch {
+				case kt.Kind() == reflect.String:
+					kv = reflect.ValueOf(on).Convert(kt)
 				default:
-					panic("amf: Unexpected key type") // should never occur
+					switch kt.Kind() {
+					case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+						s := string(on)
+						n, err := strconv.ParseInt(s, 10, 64)
+						if err != nil || reflect.Zero(kt).OverflowInt(n) {
+							return &DecodeTypeError{Value: "number " + s, Type: kt}
+						}
+						kv = reflect.ValueOf(n).Convert(kt)
+					case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+						s := string(on)
+						n, err := strconv.ParseUint(s, 10, 64)
+						if err != nil || reflect.Zero(kt).OverflowUint(n) {
+							return &DecodeTypeError{Value: "number " + s, Type: kt}
+						}
+						kv = reflect.ValueOf(n).Convert(kt)
+					default:
+						panic("amf: Unexpected key type") // should never occur
+					}
 				}
+				v.SetMapIndex(kv, subv)
 			}
-			v.SetMapIndex(kv, subv)
 		}
 	}
 }
@@ -398,6 +415,10 @@ func (d *decodeState) nullInterface() interface{} {
 
 func (d *decodeState) decodeNull(v reflect.Value) error {
 	if v.IsNil() {
+		return nil
+	}
+
+	if d.skip {
 		return nil
 	}
 
@@ -540,27 +561,29 @@ func (d *decodeState) decodeLongString(v reflect.Value) error {
 		return err
 	}
 
-	v = d.indirect(v)
+	if !d.skip {
+		v = d.indirect(v)
 
-	switch v.Kind() {
-	default:
-		return errors.New("unexpected kind (" + v.Type().String() + ") when decoding string")
-	case reflect.Int, reflect.Int32, reflect.Int64:
-		n, err := strconv.ParseInt(string(s), 10, 0)
-		if err != nil {
-			return err
+		switch v.Kind() {
+		default:
+			return errors.New("unexpected kind (" + v.Type().String() + ") when decoding string")
+		case reflect.Int, reflect.Int32, reflect.Int64:
+			n, err := strconv.ParseInt(string(s), 10, 0)
+			if err != nil {
+				return err
+			}
+			v.SetInt(n)
+		case reflect.Uint, reflect.Uint32, reflect.Uint64:
+			n, err := strconv.ParseUint(string(s), 10, 0)
+			if err != nil {
+				return err
+			}
+			v.SetUint(n)
+		case reflect.String:
+			v.SetString(string(s))
+		case reflect.Interface:
+			v.Set(reflect.ValueOf(string(s)))
 		}
-		v.SetInt(n)
-	case reflect.Uint, reflect.Uint32, reflect.Uint64:
-		n, err := strconv.ParseUint(string(s), 10, 0)
-		if err != nil {
-			return err
-		}
-		v.SetUint(n)
-	case reflect.String:
-		v.SetString(string(s))
-	case reflect.Interface:
-		v.Set(reflect.ValueOf(string(s)))
 	}
 
 	return nil
@@ -583,6 +606,8 @@ func (d *decodeState) decodeXMLDocument(v reflect.Value) error {
 }
 
 func (d *decodeState) decodeValue(v reflect.Value) error {
+	defer d.reset()
+
 	m, err := d.decodeMarker()
 	if err != nil {
 		return errors.New("read marker failed")
@@ -652,7 +677,7 @@ func (d *decodeState) decode(v interface{}) (err error) {
 	}()
 
 	rv := reflect.ValueOf(v)
-	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+	if !d.skip && (rv.Kind() != reflect.Ptr || rv.IsNil()) {
 		return &InvalidDecodeError{reflect.TypeOf(v)}
 	}
 
@@ -707,7 +732,7 @@ func (d *decodeState) valueInterface() interface{} {
 }
 
 func Decode(b []byte, vs ...interface{}) error {
-	d := decodeState{}
+	d := decodeState{ skip: false }
 	d.r = bytes.NewReader(b)
 	for _, v := range vs {
 		err := d.decode(v)
@@ -718,8 +743,8 @@ func Decode(b []byte, vs ...interface{}) error {
 	return nil
 }
 
-func DecodeWithReader(r IOReader, vs ...interface{}) error {
-	d := decodeState{}
+func DecodeWithReader(r Reader, vs ...interface{}) error {
+	d := decodeState{ skip: false }
 	d.r = r
 	for _, v := range vs {
 		err := d.decode(v)

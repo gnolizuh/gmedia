@@ -3,13 +3,21 @@ package rtmp
 import (
 	"io"
 	"errors"
-	"bufio"
 	"fmt"
 	"log"
 	"sync"
+	"encoding/binary"
 )
 
-type MessageType int
+type Reader interface {
+	Read(b []byte) (int, error)
+	ReadByte() (byte, error)
+	ReadUint32() (uint32, error)
+	ReadUint16() (uint16, error)
+	ReadUint8() (uint8, error)
+}
+
+type MessageType uint
 
 const (
 	MessageSetChunkSize MessageType = iota + 1     // 1
@@ -37,8 +45,10 @@ const (
 	MessageMax
 )
 
+type UserMessageType uint
+
 const (
-	UserMessageStreamBegin = iota                  // 0
+	UserMessageStreamBegin UserMessageType = iota      // 0
 	UserMessageStreamEOF
 	UserMessageStreamDry
 	UserMessageStreamSetBufLen
@@ -49,14 +59,7 @@ const (
 	UserMessageMax
 )
 
-type MessageReader interface {
-	OnUserControl(uint16, *bufio.Reader) error
-	OnEdge() error
-	OnAudio() error
-	OnVideo() error
-	OnAmf() error
-	OnAggregate() error
-}
+type CommandName string
 
 func min(n, m uint32) uint32 {
 	if n < m { return n } else { return m }
@@ -66,7 +69,7 @@ func max(n, m uint32) uint32 {
 	if n > m { return n } else { return m }
 }
 
-func messageType(typo uint8) string {
+func messageType(typo MessageType) string {
 	types := []string{
 		"?",
 		"chunk_size",
@@ -93,7 +96,7 @@ func messageType(typo uint8) string {
 		"aggregate",
 	}
 
-	if typo < uint8(len(types)) {
+	if typo < MessageType(len(types)) {
 		return types[typo]
 	} else {
 		return "?"
@@ -316,6 +319,35 @@ func (m *Message) ReadByte() (byte, error) {
 	return m.cl.ReadByte()
 }
 
+func (m *Message) ReadUint32() (uint32, error) {
+	var b uint32
+	err := binary.Read(m, binary.BigEndian, &b)
+	if err != nil {
+		return 0, err
+	}
+
+	return b, nil
+}
+
+func (m *Message) ReadUint16() (uint16, error) {
+	var b uint16
+	err := binary.Read(m, binary.BigEndian, &b)
+	if err != nil {
+		return 0, err
+	}
+
+	return b, nil
+}
+
+func (m *Message) ReadUint8() (uint8, error) {
+	b, err := m.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+
+	return uint8(b), nil
+}
+
 func (m *Message) Write(p []byte) (int, error) {
 	return m.cl.Write(p)
 }
@@ -408,7 +440,7 @@ func (m *Message) prepare(prev *Header) error {
 			fch.buf[head]   = byte(size >> 16)
 			fch.buf[head+1] = byte(size >> 8)
 			fch.buf[head+2] = byte(size)
-			fch.buf[head+3] = m.hdr.typo
+			fch.buf[head+3] = byte(m.hdr.typo)
 			head += 4
 			if ft == 0 {
 				fch.buf[head]   = byte(m.hdr.msid >> 24)
