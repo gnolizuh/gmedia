@@ -119,6 +119,9 @@ type Chunk struct {
 	// for writing
 	offw uint32
 	head uint32
+
+	// for sending
+	offs uint32
 }
 
 func newChunk(cs uint32) *Chunk {
@@ -127,7 +130,28 @@ func newChunk(cs uint32) *Chunk {
 		offr: MaxHeaderSize,
 		offw: MaxHeaderSize,
 		head: MaxHeaderSize,
+		offs: MaxHeaderSize,
 	}
+}
+
+func (ck *Chunk) reset(n uint32) {
+	if n > ck.head {
+		panic(fmt.Sprintf("chunk reset overflow: %d > %d", n, ck.head))
+	}
+
+	ck.head -= n
+	ck.offs = ck.head
+}
+
+func (ck *Chunk) Send(w io.Writer) error {
+	for ck.offs < ck.offw {
+		n, err := w.Write(ck.buf[ck.offs:ck.offw])
+		if err != nil {
+			return err
+		}
+		ck.offs += uint32(n)
+	}
+	return nil
 }
 
 func (ck *Chunk) Bytes(n uint32) []byte {
@@ -192,14 +216,18 @@ type ChunkList struct {
 
 	// for writing
 	offw uint32
+
+	// for sending
+	offs uint32
 }
 
 func newChunkList() *ChunkList {
 	return &ChunkList{
 		chs: []*Chunk{},
+		has: 0,
 		offr: 0,
 		offw: 0,
-		has: 0,
+		offs: 0,
 	}
 }
 
@@ -313,6 +341,18 @@ func (m *Message) appendChunk(ck *Chunk) {
 	m.cl.appendChunk(ck)
 }
 
+func (m *Message) Send(w io.Writer) error {
+	cl := m.cl
+	for cl.offs <= cl.offw {
+		err := cl.chs[cl.offs].Send(w)
+		if err != nil {
+			return err
+		}
+		cl.offs++
+	}
+	return nil
+}
+
 func (m *Message) Read(p []byte) (int, error) {
 	return m.cl.Read(p)
 }
@@ -418,7 +458,7 @@ func (m *Message) prepare(prev *Header) error {
 	}
 
 	fch := m.cl.chs[0]
-	fch.head -= uint32(hsize)
+	fch.reset(uint32(hsize))
 	head := fch.head
 
 	var ftsize uint32
@@ -470,7 +510,7 @@ func (m *Message) prepare(prev *Header) error {
 	// set following chunk's fmt to be 3
 	for i := m.cl.offw+1; i < m.cl.has; i++ {
 		ch := m.cl.chs[i]
-		ch.head -= ftsize
+		ch.reset(ftsize)
 		ch.buf[ch.head] = uint8(fch.buf[fch.head] | 0xc0)
 		copy(ch.buf[ch.head+1:ch.head+ftsize], fch.buf[fch.head+1:fch.head+ftsize])
 	}

@@ -426,10 +426,10 @@ func serveConnect(peer *Peer) error {
 		return err
 	}
 
-	// TODO: send AckSize and _result
-	log.Println(&obj)
-
-	peer.Conn.SendAckWinSize(DefaultAckWindowSize)
+	// TODO: send _result
+	if err := peer.Conn.SendAckWinSize(DefaultAckWindowSize); err != nil {
+		return err
+	}
 
 	return nil
 }

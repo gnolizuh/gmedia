@@ -418,9 +418,10 @@ func (c *Conn) SendAck(seq uint32) error {
 
 	msg.prepare(nil)
 
-	// TODO: send message
-	ck := msg.cl.chs[0]
-	c.conn.Write(ck.buf[ck.head:ck.offw])
+	err = msg.Send(c.conn)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -440,9 +441,10 @@ func (c *Conn) SendAckWinSize(win uint32) error {
 
 	msg.prepare(nil)
 
-	// TODO: send message
-	ck := msg.cl.chs[0]
-	c.conn.Write(ck.buf[ck.head:ck.offw])
+	err = msg.Send(c.conn)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
