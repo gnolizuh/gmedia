@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"time"
+	"github.com/gnolizuh/rtmp/amf"
 )
 
 const (
@@ -32,6 +33,15 @@ const (
 	DefaultSendChunkSize = 4096
 
 	MaxStreamsNum = 32
+
+	DefaultAckWindowSize = 5000000
+
+	DefaultLimitDynamic = 2
+
+	DefaultFMSVersion = "FMS/3,0,1,123"
+	DefaultCapabilities = 31
+
+	DefaultMessageStreamID = 1
 )
 
 type ServeHandler interface {
@@ -51,6 +61,13 @@ type Header struct {
 	mlen      uint32
 	typo      MessageType   // typo means type, u know why.
 	msid      uint32
+}
+
+func NewHeader(typo MessageType, csid uint32) *Header {
+	return &Header{
+		typo: typo,
+		csid: csid,
+	}
 }
 
 // to prevent GC.
@@ -387,7 +404,7 @@ func (c *Conn) pumpMessage() (*Message, error) {
 	}
 
 	if stm.msg == nil {
-		stm.msg = newMessage(&stm.hdr)
+		stm.msg = NewMessage(&stm.hdr)
 	}
 
 	stm.msg.appendChunk(ck)
@@ -404,47 +421,132 @@ func (c *Conn) pumpMessage() (*Message, error) {
 }
 
 func (c *Conn) SendAck(seq uint32) error {
-	hdr := &Header{
-		csid: 2,
-		typo: MessageAck,
-	}
-	msg := newMessage(hdr)
+	msg := NewMessage(NewHeader(MessageAck, 2))
 	msg.alloc(4)
 
-	err := binary.Write(msg, binary.BigEndian, seq)
-	if err != nil {
-		return err
-	}
-
+	binary.Write(msg, binary.BigEndian, seq)
 	msg.prepare(nil)
 
-	err = msg.Send(c.conn)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return msg.Send(c.conn)
 }
 
 func (c *Conn) SendAckWinSize(win uint32) error {
-	hdr := &Header{
-		csid: 2,
-		typo: MessageWindowAckSize,
-	}
-	msg := newMessage(hdr)
+	msg := NewMessage(NewHeader(MessageWindowAckSize, 2))
 	msg.alloc(4)
 
-	err := binary.Write(msg, binary.BigEndian, win)
-	if err != nil {
-		return err
-	}
-
+	binary.Write(msg, binary.BigEndian, win)
 	msg.prepare(nil)
 
-	err = msg.Send(c.conn)
-	if err != nil {
-		return err
+	return msg.Send(c.conn)
+}
+
+func (c *Conn) SendSetPeerBandwidth(win uint32, limit uint8) error {
+	msg := NewMessage(NewHeader(MessageSetPeerBandwidth, 2))
+	msg.alloc(5)
+
+	binary.Write(msg, binary.BigEndian, win)
+	msg.WriteByte(limit)
+	msg.prepare(nil)
+
+	return msg.Send(c.conn)
+}
+
+func (c *Conn) SendSetChunkSize(cs uint32) error {
+	msg := NewMessage(NewHeader(MessageSetChunkSize, 2))
+
+	msg.alloc(4)
+	binary.Write(msg, binary.BigEndian, cs)
+	msg.prepare(nil)
+
+	return msg.Send(c.conn)
+}
+
+func (c *Conn) SendOnBWDone() error {
+	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
+
+	b, _ := amf.Encode("onBWDone", 0, nil)
+	msg.alloc(uint32(len(b)))
+	msg.Write(b)
+	msg.prepare(nil)
+
+	return msg.Send(c.conn)
+}
+
+func (c *Conn) SendConnectResult(trans uint32, encoding uint32) error {
+	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
+
+	type Object struct {
+		FMSVer       string `amf:"fmsVer"`
+		Capabilities uint32 `amf:"capabilities"`
 	}
 
-	return nil
+	type Info struct {
+		Level          string `amf:"level"`
+		Code           string `amf:"code"`
+		Description    string `amf:"description"`
+		ObjectEncoding uint32 `amf:"objectEncoding"`
+	}
+
+	obj := Object{
+		FMSVer: DefaultFMSVersion,
+		Capabilities: DefaultCapabilities,
+	}
+	inf := Info{
+		Level: "status",
+		Code: "NetConnection.Connect.Success",
+		Description: "Connection succeeded.",
+		ObjectEncoding: encoding,
+	}
+	b, _ := amf.Encode("_result", trans, obj, inf)
+	msg.alloc(uint32(len(b)))
+	msg.Write(b)
+	msg.prepare(nil)
+
+	return msg.Send(c.conn)
+}
+
+func (c *Conn) SendReleaseStreamResult(trans uint32) error {
+	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
+
+	nullArray := []uint32{}
+	b, _ := amf.Encode("_result", trans, nil, nullArray)
+	msg.alloc(uint32(len(b)))
+	msg.Write(b)
+	msg.prepare(nil)
+
+	return msg.Send(c.conn)
+}
+
+func (c *Conn) SendOnFCPublish(trans uint32) error {
+	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
+
+	b, _ := amf.Encode("onFCPublish", trans, nil)
+	msg.alloc(uint32(len(b)))
+	msg.Write(b)
+	msg.prepare(nil)
+
+	return msg.Send(c.conn)
+}
+
+func (c *Conn) SendFCPublishResult(trans uint32) error {
+	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
+
+	nullArray := []uint32{}
+	b, _ := amf.Encode("_result", trans, nil, nullArray)
+	msg.alloc(uint32(len(b)))
+	msg.Write(b)
+	msg.prepare(nil)
+
+	return msg.Send(c.conn)
+}
+
+func (c *Conn) SendCreateStreamResult(trans uint32, stream uint32) error {
+	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
+
+	b, _ := amf.Encode("_result", trans, nil, stream)
+	msg.alloc(uint32(len(b)))
+	msg.Write(b)
+	msg.prepare(nil)
+
+	return msg.Send(c.conn)
 }

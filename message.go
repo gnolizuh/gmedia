@@ -328,7 +328,7 @@ type Message struct {
 	ready bool
 }
 
-func newMessage(hdr *Header) *Message {
+func NewMessage(hdr *Header) *Message {
 	msg := Message {
 		hdr: hdr,
 		cl: newChunkList(),

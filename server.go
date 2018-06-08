@@ -9,10 +9,6 @@ import (
 	"github.com/gnolizuh/rtmp/amf"
 )
 
-const (
-	DefaultAckWindowSize = 5000000
-)
-
 type ServeState uint
 
 type tcpKeepAliveListener struct {
@@ -409,7 +405,7 @@ func serveConnect(peer *Peer) error {
 		ObjectEncoding uint32
 	}
 
-	var transactionID uint
+	var transactionID uint32
 	err := amf.DecodeWithReader(peer.Reader, &transactionID)
 	if err != nil {
 		return err
@@ -426,8 +422,19 @@ func serveConnect(peer *Peer) error {
 		return err
 	}
 
-	// TODO: send _result
 	if err := peer.Conn.SendAckWinSize(DefaultAckWindowSize); err != nil {
+		return err
+	}
+	if err := peer.Conn.SendSetPeerBandwidth(DefaultAckWindowSize, DefaultLimitDynamic); err != nil {
+		return err
+	}
+	if err := peer.Conn.SendSetChunkSize(DefaultSendChunkSize); err != nil {
+		return err
+	}
+	if err := peer.Conn.SendOnBWDone(); err != nil {
+		return err
+	}
+	if err := peer.Conn.SendConnectResult(transactionID, obj.ObjectEncoding); err != nil {
 		return err
 	}
 
@@ -435,28 +442,36 @@ func serveConnect(peer *Peer) error {
 }
 
 func serveReleaseStream(peer *Peer) error {
-	var transactionID uint
-	var null int
+	var transactionID uint32
+	null := []uint32{}
 	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
 	if err != nil {
+		log.Println(err)
 		return err
 	}
 
 	var name string
 	err = amf.DecodeWithReader(peer.Reader, &name)
 	if err != nil {
+		log.Println(err)
 		return err
 	}
 
-	log.Println(name)
+	if err := peer.Conn.SendReleaseStreamResult(transactionID); err != nil {
+		return err
+	}
 
 	return nil
 }
 
 func serveCreateStream(peer *Peer) error {
-	var transactionID uint
+	var transactionID uint32
 	err := amf.DecodeWithReader(peer.Reader, &transactionID)
 	if err != nil {
+		return err
+	}
+
+	if err := peer.Conn.SendCreateStreamResult(transactionID, DefaultMessageStreamID); err != nil {
 		return err
 	}
 
@@ -476,8 +491,8 @@ func serveCloseStream(peer *Peer) error {
 }
 
 func serveDeleteStream(peer *Peer) error {
-	var transactionID uint
-	var null int
+	var transactionID uint32
+	null := []uint32{}
 	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
 	if err != nil {
 		return err
@@ -495,8 +510,8 @@ func serveDeleteStream(peer *Peer) error {
 }
 
 func serveFCPublish(peer *Peer) error {
-	var transactionID uint
-	var null int
+	var transactionID uint32
+	null := []uint32{}
 	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
 	if err != nil {
 		return err
@@ -508,14 +523,19 @@ func serveFCPublish(peer *Peer) error {
 		return err
 	}
 
-	log.Println(name)
+	if err := peer.Conn.SendOnFCPublish(transactionID); err != nil {
+		return err
+	}
+	if err := peer.Conn.SendFCPublishResult(transactionID); err != nil {
+		return err
+	}
 
 	return nil
 }
 
 func servePublish(peer *Peer) error {
-	var transactionID uint
-	var null int
+	var transactionID uint32
+	null := []uint32{}
 	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
 	if err != nil {
 		return err
@@ -533,8 +553,8 @@ func servePublish(peer *Peer) error {
 }
 
 func servePlay(peer *Peer) error {
-	var transactionID uint
-	var null int
+	var transactionID uint32
+	null := []uint32{}
 	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
 	if err != nil {
 		return err
@@ -564,8 +584,8 @@ func servePlay2(peer *Peer) error {
 		StreamName string
 	}
 
-	var transactionID uint
-	var null int
+	var transactionID uint32
+	null := []uint32{}
 	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
 	if err != nil {
 		return err
@@ -584,8 +604,8 @@ func servePlay2(peer *Peer) error {
 }
 
 func serveSeek(peer *Peer) error {
-	var transactionID uint
-	var null int
+	var transactionID uint32
+	null := []uint32{}
 	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
 	if err != nil {
 		return err
@@ -603,8 +623,8 @@ func serveSeek(peer *Peer) error {
 }
 
 func servePause(peer *Peer) error {
-	var transactionID uint
-	var null int
+	var transactionID uint32
+	null := []uint32{}
 	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
 	if err != nil {
 		return err

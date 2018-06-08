@@ -353,14 +353,14 @@ type arrayEncoder struct {
 // - 4 byte big endian uint32 to determine length of associative array
 // - n (length) encoded values
 func (ae *arrayEncoder) encode(e *encodeState, v reflect.Value) {
-	n := v.Len()
-	if n == 0 {
+	if v.IsNil() || v.Len() == 0 {
+		e.encodeMarker(ArrayNullMarker)
 		return
 	}
 
 	e.encodeMarker(StrictArrayMarker)
-	e.encodeUint(uint32(n))
-	for i := 0; i < n; i++ {
+	e.encodeUint(uint32(v.Len()))
+	for i := 0; i < v.Len(); i++ {
 		ae.elemEnc(e, v.Index(i))
 	}
 }
