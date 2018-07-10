@@ -116,7 +116,7 @@ func findDigest(b, key []byte, base uint32) (bool, uint32) {
 		return false, 0
 	}
 
-	return bytes.Equal(b[offs:], hs), offs
+	return bytes.Equal(b[offs:offs+uint32(len(hs))], hs), offs
 }
 
 func writeDigest(b, key []byte, base uint32) error {
@@ -189,7 +189,7 @@ func (c *Conn) sendChallenge(version, key []byte) error {
 	s01[0] = ProtoVersion
 
 	// s1
-	binary.BigEndian.PutUint32(s01[1:5], c.epoch) // timestamp
+	binary.BigEndian.PutUint32(s01[1:5], c.epoch)  // timestamp
 	copy(s01[5:9], version)                        // version(zero)
 
 	makeRandom(s01[9:])                            // random

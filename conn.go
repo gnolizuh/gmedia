@@ -172,6 +172,7 @@ func (c *Conn) serve() {
 	peer := &c.peer
 	err := c.handshake()
 	if err != nil {
+		log.Print(err)
 		return
 	} else {
 		err := c.handler.serveNew(peer)
