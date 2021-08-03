@@ -24,9 +24,9 @@ const (
 	MaxExtendHeaderSize = 4
 
 	// Chunk header:
-    //   max 3  basic header
-    // + max 11 message header
-    // + max 4  extended header (timestamp)
+	//   max 3  basic header
+	// + max 11 message header
+	// + max 4  extended header (timestamp)
 	MaxHeaderSize = MaxBasicHeaderSize + MaxMessageHeaderSize + MaxExtendHeaderSize
 
 	DefaultReadChunkSize = 128
