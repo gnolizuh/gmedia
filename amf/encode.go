@@ -2,15 +2,15 @@ package amf
 
 import (
 	"bytes"
-	"runtime"
-	"reflect"
-	"sync"
 	"encoding/binary"
-	"sync/atomic"
+	"reflect"
+	"runtime"
 	"sort"
-	"unicode"
-	"strings"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"unicode"
 )
 
 type EncoderError struct {
@@ -22,13 +22,37 @@ func (e *EncoderError) Error() string {
 	return "amf: error calling EncodeAMF for type " + e.Type.String() + ": " + e.Err.Error()
 }
 
+// An encodeState encodes AMF into a bytes.Buffer.
 type encodeState struct {
-	bytes.Buffer
-	cache        map[string]int
-	scratch      [64]byte
+	bytes.Buffer // accumulated output
+
+	// Keep track of what pointers we've seen in the current recursive call
+	// path, to avoid cycles that could lead to a stack overflow. Only do
+	// the relatively expensive map operations if ptrLevel is larger than
+	// startDetectingCyclesAfter, so that we skip the work if we're within a
+	// reasonable amount of nested pointers deep.
+	ptrLevel uint
+	ptrSeen  map[any]struct{}
 }
 
-func (e *encodeState) encode(v interface{}) (err error) {
+const startDetectingCyclesAfter = 1000
+
+var encodeStatePool sync.Pool
+
+func newEncodeState() *encodeState {
+	if v := encodeStatePool.Get(); v != nil {
+		e := v.(*encodeState)
+		e.Reset()
+		if len(e.ptrSeen) > 0 {
+			panic("ptrEncoder.encode should have emptied ptrSeen via defers")
+		}
+		e.ptrLevel = 0
+		return e
+	}
+	return &encodeState{ptrSeen: make(map[any]struct{})}
+}
+
+func (e *encodeState) encode(v interface{}, opts encOpts) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(runtime.Error); ok {
@@ -40,7 +64,7 @@ func (e *encodeState) encode(v interface{}) (err error) {
 			err = r.(error)
 		}
 	}()
-	e.reflectValue(reflect.ValueOf(v))
+	e.reflectValue(reflect.ValueOf(v), opts)
 	return nil
 }
 
@@ -48,8 +72,12 @@ func (e *encodeState) encodeError(err error) {
 	panic(err)
 }
 
-func (e *encodeState) reflectValue(v reflect.Value) {
-	valueEncoder(v)(e, v)
+func (e *encodeState) reflectValue(v reflect.Value, opts encOpts) {
+	valueEncoder(v)(e, v, opts)
+}
+
+type encOpts struct {
+	// empty opts
 }
 
 func (e *encodeState) encodeObjectName(s string) {
@@ -85,10 +113,10 @@ func (w *reflectWithString) resolve() error {
 func (e *encodeState) encodeString(s string) {
 	l := len(s)
 	if l > LongStringSize {
-		e.encodeMarker(LongStringMarker)
+		e.encodeMarker(LongStringMarker0)
 		e.encodeUint(uint32(l))
 	} else {
-		e.encodeMarker(StringMarker)
+		e.encodeMarker(StringMarker0)
 		e.encodeUint(uint16(l))
 	}
 	e.Write([]byte(s))
@@ -99,7 +127,7 @@ func (e *encodeState) encodeUint(u interface{}) {
 }
 
 func (e *encodeState) encodeBool(b bool) {
-	e.encodeMarker(BooleanMarker)
+	e.encodeMarker(BooleanMarker0)
 	if b {
 		e.WriteByte(1)
 	} else {
@@ -108,15 +136,15 @@ func (e *encodeState) encodeBool(b bool) {
 }
 
 func (e *encodeState) encodeFloat64(f float64) {
-	e.encodeMarker(NumberMarker)
+	e.encodeMarker(NumberMarker0)
 	binary.Write(e, binary.BigEndian, f)
 }
 
 func (e *encodeState) encodeNull() {
-	e.WriteByte(NullMarker)
+	e.WriteByte(NullMarker0)
 }
 
-type encoderFunc func(e *encodeState, v reflect.Value)
+type encoderFunc func(e *encodeState, v reflect.Value, opts encOpts)
 
 var encoderCache sync.Map
 
@@ -137,9 +165,9 @@ func typeEncoder(t reflect.Type) encoderFunc {
 		f  encoderFunc
 	)
 	wg.Add(1)
-	fi, loaded := encoderCache.LoadOrStore(t, encoderFunc(func(e *encodeState, v reflect.Value) {
+	fi, loaded := encoderCache.LoadOrStore(t, encoderFunc(func(e *encodeState, v reflect.Value, opts encOpts) {
 		wg.Wait()
-		f(e, v)
+		f(e, v, opts)
 	}))
 	if loaded {
 		return fi.(encoderFunc)
@@ -169,7 +197,7 @@ func newTypeEncoder(t reflect.Type) encoderFunc {
 		return newStructEncoder(t)
 	case reflect.Map:
 		return newMapEncoder(t)
-	case reflect.Slice:  // slice & array are type of Strict Array Marker.
+	case reflect.Slice: // slice & array are type of Strict Array Marker.
 		return newSliceEncoder(t)
 	case reflect.Array:
 		return newArrayEncoder(t)
@@ -180,36 +208,36 @@ func newTypeEncoder(t reflect.Type) encoderFunc {
 	}
 }
 
-func stringEncoder(e *encodeState, v reflect.Value) {
+func stringEncoder(e *encodeState, v reflect.Value, _ encOpts) {
 	e.encodeString(v.String())
 }
 
-func boolEncoder(e *encodeState, v reflect.Value) {
+func boolEncoder(e *encodeState, v reflect.Value, _ encOpts) {
 	e.encodeBool(v.Bool())
 }
 
-func invalidValueEncoder(e *encodeState, _ reflect.Value) {
+func invalidValueEncoder(e *encodeState, _ reflect.Value, _ encOpts) {
 	e.encodeNull()
 }
 
-func intEncoder(e *encodeState, v reflect.Value) {
+func intEncoder(e *encodeState, v reflect.Value, _ encOpts) {
 	e.encodeFloat64(float64(v.Int()))
 }
 
-func uintEncoder(e *encodeState, v reflect.Value) {
+func uintEncoder(e *encodeState, v reflect.Value, _ encOpts) {
 	e.encodeFloat64(float64(v.Uint()))
 }
 
-func floatEncoder(e *encodeState, v reflect.Value) {
+func floatEncoder(e *encodeState, v reflect.Value, _ encOpts) {
 	e.encodeFloat64(v.Float())
 }
 
-func interfaceEncoder(e *encodeState, v reflect.Value) {
+func interfaceEncoder(e *encodeState, v reflect.Value, opts encOpts) {
 	if v.IsNil() {
 		e.encodeNull()
 		return
 	}
-	e.reflectValue(v.Elem())
+	e.reflectValue(v.Elem(), opts)
 }
 
 func isValidTag(s string) bool {
@@ -260,18 +288,18 @@ type structEncoder struct {
 // format:
 // - loop encoded string followed by encoded value
 // - terminated with empty string followed by 1 byte 0x09
-func (se *structEncoder) encode(e *encodeState, v reflect.Value) {
-	e.encodeMarker(ObjectMarker)
+func (se *structEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+	e.encodeMarker(ObjectMarker0)
 	for i, f := range se.fields {
 		fv := fieldByIndex(v, f.index)
 		if !fv.IsValid() {
 			continue
 		}
 		e.encodeObjectName(f.name)
-		se.fieldEncs[i](e, fv)
+		se.fieldEncs[i](e, fv, opts)
 	}
 	e.encodeObjectName("")
-	e.encodeMarker(ObjectEndMarker)
+	e.encodeMarker(ObjectEndMarker0)
 }
 
 func newStructEncoder(t reflect.Type) encoderFunc {
@@ -290,7 +318,7 @@ type mapEncoder struct {
 	elemEnc encoderFunc
 }
 
-func (mae *mapEncoder) encode(e *encodeState, v reflect.Value) {
+func (mae *mapEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 	if v.IsNil() {
 		e.encodeNull()
 		return
@@ -306,13 +334,13 @@ func (mae *mapEncoder) encode(e *encodeState, v reflect.Value) {
 	}
 	sort.Slice(sv, func(i, j int) bool { return sv[i].s < sv[j].s })
 
-	e.encodeMarker(ObjectMarker)
+	e.encodeMarker(ObjectMarker0)
 	for _, kv := range sv {
 		e.encodeObjectName(kv.s)
-		mae.elemEnc(e, v.MapIndex(kv.v))
+		mae.elemEnc(e, v.MapIndex(kv.v), opts)
 	}
 	e.encodeObjectName("")
-	e.encodeMarker(ObjectEndMarker)
+	e.encodeMarker(ObjectEndMarker0)
 }
 
 func newMapEncoder(t reflect.Type) encoderFunc {
@@ -331,12 +359,12 @@ type sliceEncoder struct {
 	arrayEnc encoderFunc
 }
 
-func (se *sliceEncoder) encode(e *encodeState, v reflect.Value) {
+func (se *sliceEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 	if v.IsNil() {
 		e.encodeNull()
 		return
 	}
-	se.arrayEnc(e, v)
+	se.arrayEnc(e, v, opts)
 }
 
 func newSliceEncoder(t reflect.Type) encoderFunc {
@@ -352,16 +380,16 @@ type arrayEncoder struct {
 // format:
 // - 4 byte big endian uint32 to determine length of associative array
 // - n (length) encoded values
-func (ae *arrayEncoder) encode(e *encodeState, v reflect.Value) {
+func (ae *arrayEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 	if v.IsNil() || v.Len() == 0 {
-		e.encodeMarker(ArrayNullMarker)
+		e.encodeMarker(UndefinedMarker0)
 		return
 	}
 
-	e.encodeMarker(StrictArrayMarker)
+	e.encodeMarker(StrictArrayMarker0)
 	e.encodeUint(uint32(v.Len()))
 	for i := 0; i < v.Len(); i++ {
-		ae.elemEnc(e, v.Index(i))
+		ae.elemEnc(e, v.Index(i), opts)
 	}
 }
 
@@ -374,12 +402,12 @@ type ptrEncoder struct {
 	elemEnc encoderFunc
 }
 
-func (pe *ptrEncoder) encode(e *encodeState, v reflect.Value) {
+func (pe *ptrEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 	if v.IsNil() {
 		e.encodeNull()
 		return
 	}
-	pe.elemEnc(e, v.Elem())
+	pe.elemEnc(e, v.Elem(), opts)
 }
 
 func newPtrEncoder(t reflect.Type) encoderFunc {
@@ -387,7 +415,7 @@ func newPtrEncoder(t reflect.Type) encoderFunc {
 	return enc.encode
 }
 
-func unsupportedTypeEncoder(e *encodeState, v reflect.Value) {
+func unsupportedTypeEncoder(e *encodeState, v reflect.Value, _ encOpts) {
 	e.encodeError(&UnsupportedTypeError{v.Type()})
 }
 
@@ -399,25 +427,27 @@ func (e *UnsupportedTypeError) Error() string {
 	return "amf: unsupported type: " + e.Type.String()
 }
 
-func Encode(vs ...interface{}) ([]byte, error) {
-	e := &encodeState{}
-	for _, v := range vs {
-		err := e.encode(v)
-		if err != nil {
-			return nil, err
-		}
+func Encode(v any) ([]byte, error) {
+	e := newEncodeState()
+	defer encodeStatePool.Put(e)
+
+	err := e.encode(v, encOpts{})
+	if err != nil {
+		return nil, err
 	}
-	return e.Bytes(), nil
+	buf := append([]byte(nil), e.Bytes()...)
+
+	return buf, nil
 }
 
 // A field represents a single field found in a struct.
 type field struct {
 	name      string
-	nameBytes []byte                 // []byte(name)
+	nameBytes []byte // []byte(name)
 
-	tag       bool
-	index     []int
-	typo      reflect.Type
+	tag   bool
+	index []int
+	typo  reflect.Type
 }
 
 func fillField(f field) field {
@@ -493,10 +523,10 @@ func typeFields(t reflect.Type) []field {
 						name = sf.Name
 					}
 					fields = append(fields, fillField(field{
-						name:      name,
-						tag:       tagged,
-						index:     index,
-						typo:      ft,
+						name:  name,
+						tag:   tagged,
+						index: index,
+						typo:  ft,
 					}))
 					if count[f.typo] > 1 {
 						fields = append(fields, fields[len(fields)-1])

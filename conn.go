@@ -1,29 +1,29 @@
 package rtmp
 
 import (
-	"io"
-	"sync"
-	"encoding/binary"
-	"net"
 	"bufio"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
-	"time"
 	"github.com/gnolizuh/rtmp/amf"
+	"io"
+	"log"
+	"net"
+	"sync"
+	"time"
 )
 
 const (
-	// Basic Header (1 to 3 bytes)
+	// MaxBasicHeaderSize : Basic Header (1 to 3 bytes)
 	MaxBasicHeaderSize = 3
 
-	// Message Header (0, 3, 7, or 11 bytes)
+	// MaxMessageHeaderSize : Message Header (0, 3, 7, or 11 bytes)
 	MaxMessageHeaderSize = 11
 
-	// Extended Timestamp (0 or 4 bytes)
+	// MaxExtendHeaderSize : Extended Timestamp (0 or 4 bytes)
 	MaxExtendHeaderSize = 4
 
-	// Chunk header:
+	// MaxHeaderSize : Chunk header:
 	//   max 3  basic header
 	// + max 11 message header
 	// + max 4  extended header (timestamp)
@@ -38,7 +38,7 @@ const (
 
 	DefaultLimitDynamic = 2
 
-	DefaultFMSVersion = "FMS/3,0,1,123"
+	DefaultFMSVersion   = "FMS/3,0,1,123"
 	DefaultCapabilities = 31
 
 	DefaultMessageStreamID = 1
@@ -49,9 +49,9 @@ type ServeHandler interface {
 	serveMessage(MessageType, *Peer) error
 }
 
-type MessageHandler func (*Peer) error
-type UserMessageHandler func (*Peer) error
-type AMFCommandHandler func (*Peer) error
+type MessageHandler func(*Peer) error
+type UserMessageHandler func(*Peer) error
+type AMFCommandHandler func(*Peer) error
 
 // Header declare.
 type Header struct {
@@ -59,7 +59,7 @@ type Header struct {
 	csid      uint32
 	timestamp uint32
 	mlen      uint32
-	typo      MessageType   // typo means type, u know why.
+	typo      MessageType // typo means type, u know why.
 	msid      uint32
 }
 
@@ -85,13 +85,13 @@ const (
 )
 
 type ChunkStream struct {
-	active     bool
-	timestamp  uint32
-	csid       uint32
-	dropped    uint32
+	active    bool
+	timestamp uint32
+	csid      uint32
+	dropped   uint32
 }
 
-// RTMP stream declare.
+// Stream : RTMP stream declare.
 type Stream struct {
 	hdr Header
 	msg *Message
@@ -100,29 +100,29 @@ type Stream struct {
 
 // The Conn type represents a RTMP connection.
 type Conn struct {
-	conn       net.Conn
+	conn net.Conn
 
 	// Connection incoming time(microsecond) and incoming time from remote peer.
 	epoch         uint32
 	incomingEpoch uint32
 
 	// State and digest be used in RTMP handshake.
-	state      HandshakeState
-	digest     []byte
+	state  HandshakeState
+	digest []byte
 
 	// Read and write buffer.
-	bufReader  *bufio.Reader
-	bufWriter  *bufio.Writer
+	bufReader *bufio.Reader
+	bufWriter *bufio.Writer
 
 	// stream message
-	streams    []Stream
+	streams []Stream
 
 	// chunk stream
-	cs         [MaxChunkStream]ChunkStream
+	cs [MaxChunkStream]ChunkStream
 
 	// chunk message
-	chunkSize  uint32
-	chunkPool  *sync.Pool
+	chunkSize uint32
+	chunkPool *sync.Pool
 
 	// ack window size
 	ackWinSize uint32
@@ -130,10 +130,10 @@ type Conn struct {
 	inLastAck  uint32
 
 	// peer wrapper
-	peer       Peer
+	peer Peer
 
 	// message callback function.
-	handler    ServeHandler
+	handler ServeHandler
 }
 
 // Create new connection from conn.
@@ -157,7 +157,7 @@ func newConn(conn net.Conn) *Conn {
 
 	c.peer = Peer{
 		RemoteAddr: c.conn.RemoteAddr().String(),
-		Conn: c,
+		Conn:       c,
 	}
 
 	return c
@@ -225,7 +225,7 @@ func (c *Conn) readFull(buf []byte) error {
 		c.inLastAck = 0
 	}
 
-	if c.ackWinSize > 0 && c.inBytes - c.inLastAck >= c.ackWinSize {
+	if c.ackWinSize > 0 && c.inBytes-c.inLastAck >= c.ackWinSize {
 		c.inLastAck = c.inBytes
 
 		err := c.SendAck(c.inBytes)
@@ -239,7 +239,7 @@ func (c *Conn) readFull(buf []byte) error {
 
 func (c *Conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 	off := uint32(0)
-	err := c.readFull(b[off:off+1])
+	err := c.readFull(b[off : off+1])
 	if err != nil {
 		return 0, err
 	}
@@ -253,7 +253,7 @@ func (c *Conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 	 * |fmt|   cs id   |
 	 * +-+-+-+-+-+-+-+-+
 	 */
-	hdr.fmt = uint8(b[off] >> 6) & 0x03
+	hdr.fmt = uint8(b[off]>>6) & 0x03
 	hdr.csid = uint32(uint8(b[off]) & 0x3f)
 
 	off += 1
@@ -267,7 +267,7 @@ func (c *Conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		 */
 		hdr.csid = 64
-		err := c.readFull(b[off:off+1])
+		err := c.readFull(b[off : off+1])
 		if err != nil {
 			return 0, err
 		}
@@ -284,7 +284,7 @@ func (c *Conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
 		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		 */
 		hdr.csid = 64
-		err := c.readFull(b[off:off+2])
+		err := c.readFull(b[off : off+2])
 		if err != nil {
 			return 0, err
 		}
@@ -308,7 +308,7 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 	off := uint32(0)
 	if hdr.fmt <= 2 {
-		err := c.readFull(b[off:off+3])
+		err := c.readFull(b[off : off+3])
 		if err != nil {
 			return 0, err
 		}
@@ -316,7 +316,7 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 		off += 3
 
 		if hdr.fmt <= 1 {
-			err := c.readFull(b[off:off+4])
+			err := c.readFull(b[off : off+4])
 			if err != nil {
 				return 0, err
 			}
@@ -326,22 +326,22 @@ func (c *Conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 			off += 1
 
 			if hdr.fmt == 0 {
-				err := c.readFull(b[off:off+4])
+				err := c.readFull(b[off : off+4])
 				if err != nil {
 					return 0, err
 				}
-				hdr.msid = binary.BigEndian.Uint32(b[off:off+4])
+				hdr.msid = binary.BigEndian.Uint32(b[off : off+4])
 				off += 4
 			}
 		}
 	}
 
 	if hdr.timestamp == 0x00ffffff {
-		err := c.readFull(b[off:off+4])
+		err := c.readFull(b[off : off+4])
 		if err != nil {
 			return 0, err
 		}
-		hdr.timestamp = binary.BigEndian.Uint32(b[off:off+4])
+		hdr.timestamp = binary.BigEndian.Uint32(b[off : off+4])
 		off += 4
 	}
 
@@ -394,7 +394,7 @@ func (c *Conn) pumpMessage() (*Message, error) {
 		}
 	}
 
-	n = min(stm.hdr.mlen - stm.len, c.getReadChunkSize())
+	n = min(stm.hdr.mlen-stm.len, c.getReadChunkSize())
 	ck := c.chunkPool.Get().(*Chunk)
 	// TODO: ck need to free
 
@@ -425,8 +425,8 @@ func (c *Conn) SendAck(seq uint32) error {
 	msg := NewMessage(NewHeader(MessageAck, 2))
 	msg.alloc(4)
 
-	binary.Write(msg, binary.BigEndian, seq)
-	msg.prepare(nil)
+	_ = binary.Write(msg, binary.BigEndian, seq)
+	_ = msg.prepare(nil)
 
 	return msg.Send(c.conn)
 }
@@ -435,8 +435,8 @@ func (c *Conn) SendAckWinSize(win uint32) error {
 	msg := NewMessage(NewHeader(MessageWindowAckSize, 2))
 	msg.alloc(4)
 
-	binary.Write(msg, binary.BigEndian, win)
-	msg.prepare(nil)
+	_ = binary.Write(msg, binary.BigEndian, win)
+	_ = msg.prepare(nil)
 
 	return msg.Send(c.conn)
 }
@@ -445,9 +445,9 @@ func (c *Conn) SendSetPeerBandwidth(win uint32, limit uint8) error {
 	msg := NewMessage(NewHeader(MessageSetPeerBandwidth, 2))
 	msg.alloc(5)
 
-	binary.Write(msg, binary.BigEndian, win)
-	msg.WriteByte(limit)
-	msg.prepare(nil)
+	_ = binary.Write(msg, binary.BigEndian, win)
+	_ = msg.WriteByte(limit)
+	_ = msg.prepare(nil)
 
 	return msg.Send(c.conn)
 }
@@ -456,8 +456,8 @@ func (c *Conn) SendSetChunkSize(cs uint32) error {
 	msg := NewMessage(NewHeader(MessageSetChunkSize, 2))
 
 	msg.alloc(4)
-	binary.Write(msg, binary.BigEndian, cs)
-	msg.prepare(nil)
+	_ = binary.Write(msg, binary.BigEndian, cs)
+	_ = msg.prepare(nil)
 
 	return msg.Send(c.conn)
 }
@@ -465,10 +465,15 @@ func (c *Conn) SendSetChunkSize(cs uint32) error {
 func (c *Conn) SendOnBWDone() error {
 	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
 
-	b, _ := amf.Encode("onBWDone", 0, nil)
+	v := make([]interface{}, 0)
+	v = append(v, "onBWDone")
+	v = append(v, 0)
+	v = append(v, nil)
+
+	b, _ := amf.Encode(v)
 	msg.alloc(uint32(len(b)))
-	msg.Write(b)
-	msg.prepare(nil)
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
 
 	return msg.Send(c.conn)
 }
@@ -489,31 +494,44 @@ func (c *Conn) SendConnectResult(trans uint32, encoding uint32) error {
 	}
 
 	obj := Object{
-		FMSVer: DefaultFMSVersion,
+		FMSVer:       DefaultFMSVersion,
 		Capabilities: DefaultCapabilities,
 	}
 	inf := Info{
-		Level: "status",
-		Code: "NetConnection.Connect.Success",
-		Description: "Connection succeeded.",
+		Level:          "status",
+		Code:           "NetConnection.Connect.Success",
+		Description:    "Connection succeeded.",
 		ObjectEncoding: encoding,
 	}
-	b, _ := amf.Encode("_result", trans, obj, inf)
+
+	v := make([]interface{}, 0)
+	v = append(v, "_result")
+	v = append(v, trans)
+	v = append(v, obj)
+	v = append(v, inf)
+
+	b, _ := amf.Encode(v)
 	msg.alloc(uint32(len(b)))
-	msg.Write(b)
-	msg.prepare(nil)
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
 
 	return msg.Send(c.conn)
 }
 
 func (c *Conn) SendReleaseStreamResult(trans uint32) error {
 	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
+	var nullArray []uint32
 
-	nullArray := []uint32{}
-	b, _ := amf.Encode("_result", trans, nil, nullArray)
+	v := make([]interface{}, 0)
+	v = append(v, "_result")
+	v = append(v, trans)
+	v = append(v, nil)
+	v = append(v, nullArray)
+
+	b, _ := amf.Encode(v)
 	msg.alloc(uint32(len(b)))
-	msg.Write(b)
-	msg.prepare(nil)
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
 
 	return msg.Send(c.conn)
 }
@@ -521,22 +539,33 @@ func (c *Conn) SendReleaseStreamResult(trans uint32) error {
 func (c *Conn) SendOnFCPublish(trans uint32) error {
 	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
 
-	b, _ := amf.Encode("onFCPublish", trans, nil)
+	v := make([]interface{}, 0)
+	v = append(v, "onFCPublish")
+	v = append(v, trans)
+	v = append(v, nil)
+
+	b, _ := amf.Encode(v)
 	msg.alloc(uint32(len(b)))
-	msg.Write(b)
-	msg.prepare(nil)
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
 
 	return msg.Send(c.conn)
 }
 
 func (c *Conn) SendFCPublishResult(trans uint32) error {
 	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
+	var nullArray []uint32
 
-	nullArray := []uint32{}
-	b, _ := amf.Encode("_result", trans, nil, nullArray)
+	v := make([]interface{}, 0)
+	v = append(v, "_result")
+	v = append(v, trans)
+	v = append(v, nil)
+	v = append(v, nullArray)
+
+	b, _ := amf.Encode(v)
 	msg.alloc(uint32(len(b)))
-	msg.Write(b)
-	msg.prepare(nil)
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
 
 	return msg.Send(c.conn)
 }
@@ -544,10 +573,16 @@ func (c *Conn) SendFCPublishResult(trans uint32) error {
 func (c *Conn) SendCreateStreamResult(trans uint32, stream uint32) error {
 	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
 
-	b, _ := amf.Encode("_result", trans, nil, stream)
+	v := make([]interface{}, 0)
+	v = append(v, "_result")
+	v = append(v, trans)
+	v = append(v, nil)
+	v = append(v, stream)
+
+	b, _ := amf.Encode(v)
 	msg.alloc(uint32(len(b)))
-	msg.Write(b)
-	msg.prepare(nil)
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
 
 	return msg.Send(c.conn)
 }

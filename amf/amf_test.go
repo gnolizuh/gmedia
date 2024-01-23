@@ -1,8 +1,8 @@
 package amf
 
 import (
-	"testing"
 	"fmt"
+	"testing"
 )
 
 func TestEncodeInt(t *testing.T) {
@@ -51,7 +51,7 @@ func TestEncodeString(t *testing.T) {
 
 func TestEncodeBool(t *testing.T) {
 	in := true
-	b, err := Encode(in)
+	b, err := Encode(&in)
 	if err != nil {
 		t.Error(err)
 		return
@@ -79,9 +79,9 @@ type AMFStruct struct {
 
 func TestEncodeStruct(t *testing.T) {
 	in := AMFStruct{
-		Int: 10,
+		Int:    10,
 		String: "1",
-		Bool: true,
+		Bool:   true,
 	}
 
 	b, err := Encode(in)
@@ -106,9 +106,9 @@ func TestEncodeStruct(t *testing.T) {
 
 func TestEncodeStruct2Map(t *testing.T) {
 	in := AMFStruct{
-		Int: 10,
+		Int:    10,
 		String: "1",
-		Bool: true,
+		Bool:   true,
 	}
 
 	b, err := Encode(in)
@@ -128,28 +128,36 @@ func TestEncodeStruct2Map(t *testing.T) {
 }
 
 func TestEncodeVars(t *testing.T) {
-	in_name := "publish"
-	in_num := 10
-	in_obj := AMFStruct{
-		Int: 10,
+	in := struct {
+		Name string
+		Num  int
+		Obj  AMFStruct
+	}{}
+
+	in.Name = "publish"
+	in.Num = 10
+	in.Obj = AMFStruct{
+		Int:    10,
 		String: "1",
-		Bool: true,
+		Bool:   true,
 	}
 
-	b, err := Encode(&in_name, &in_num, &in_obj)
+	b, err := Encode(&in)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	var out_name string
-	var out_num int
-	out_obj := make(map[string]interface{}, 4)
-	err = Decode(b, &out_name, &out_num, &out_obj)
+	out := struct {
+		Name string
+		Num  int
+		Obj  AMFStruct
+	}{}
+	err = Decode(b, &out)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	fmt.Printf("passed: %s %d %v\n", out_name, out_num, out_obj)
+	fmt.Printf("passed: %s %d %v\n", out.Num, out.Num, out.Obj)
 }

@@ -1,12 +1,12 @@
 package rtmp
 
 import (
-	"net"
-	"log"
-	"time"
 	"errors"
 	"fmt"
 	"github.com/gnolizuh/rtmp/amf"
+	"log"
+	"net"
+	"time"
 )
 
 type ServeState uint
@@ -36,7 +36,7 @@ type Server struct {
 
 func ListenAndServe(addr string, handler Handler) error {
 	server := &Server{
-		Addr: addr,
+		Addr:    addr,
 		Handler: handler,
 	}
 	return server.ListenAndServe()
@@ -69,7 +69,7 @@ func (srv *Server) Serve(l net.Listener) error {
 
 		// Set connection state.
 		c.setState(StateServerRecvChallenge)
-		c.handler = &serverHandler{ srv: srv, c: c }
+		c.handler = &serverHandler{srv: srv, conn: c}
 		c.peer.handler = srv.Handler
 
 		go c.serve()
@@ -77,8 +77,8 @@ func (srv *Server) Serve(l net.Listener) error {
 }
 
 type serverHandler struct {
-	srv *Server
-	c   *Conn
+	srv  *Server
+	conn *Conn
 }
 
 func (sh *serverHandler) serveNew(peer *Peer) error {
