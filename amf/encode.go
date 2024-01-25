@@ -1,3 +1,19 @@
+//
+// Copyright [2024] [https://github.com/gnolizuh]
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
 package amf
 
 import (
@@ -9,7 +25,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"unicode"
 )
 
@@ -20,6 +35,23 @@ type EncoderError struct {
 
 func (e *EncoderError) Error() string {
 	return "amf: error calling EncodeAMF for type " + e.Type.String() + ": " + e.Err.Error()
+}
+
+// A MarshalerError represents an error from calling a MarshalAMF method.
+type MarshalerError struct {
+	Type       reflect.Type
+	Err        error
+	sourceFunc string
+}
+
+func (e *MarshalerError) Error() string {
+	srcFunc := e.sourceFunc
+	if srcFunc == "" {
+		srcFunc = "MarshalAMF"
+	}
+	return "amf: error calling " + srcFunc +
+		" for type " + e.Type.String() +
+		": " + e.Err.Error()
 }
 
 // An encodeState encodes AMF into a bytes.Buffer.
@@ -34,8 +66,6 @@ type encodeState struct {
 	ptrLevel uint
 	ptrSeen  map[any]struct{}
 }
-
-const startDetectingCyclesAfter = 1000
 
 var encodeStatePool sync.Pool
 
@@ -52,7 +82,12 @@ func newEncodeState() *encodeState {
 	return &encodeState{ptrSeen: make(map[any]struct{})}
 }
 
-func (e *encodeState) encode(v interface{}, opts encOpts) (err error) {
+// amfError is an error wrapper type for internal use only.
+// Panics with errors are wrapped in amfError so that the top-level recover
+// can distinguish intentional panics from this package.
+type amfError struct{ error }
+
+func (e *encodeState) marshal(v interface{}, opts encOpts) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(runtime.Error); ok {
@@ -68,8 +103,31 @@ func (e *encodeState) encode(v interface{}, opts encOpts) (err error) {
 	return nil
 }
 
+// error aborts the encoding by panicking with err wrapped in amfError.
+func (e *encodeState) error(err error) {
+	panic(amfError{err})
+}
+
 func (e *encodeState) encodeError(err error) {
 	panic(err)
+}
+
+func isEmptyValue(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+		return v.Len() == 0
+	case reflect.Bool:
+		return v.Bool() == false
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return v.Int() == 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return v.Uint() == 0
+	case reflect.Float32, reflect.Float64:
+		return v.Float() == 0
+	case reflect.Interface, reflect.Pointer:
+		return v.IsNil()
+	}
+	return false
 }
 
 func (e *encodeState) reflectValue(v reflect.Value, opts encOpts) {
@@ -77,7 +135,8 @@ func (e *encodeState) reflectValue(v reflect.Value, opts encOpts) {
 }
 
 type encOpts struct {
-	// empty opts
+	// quoted causes primitive fields to be encoded inside JSON strings.
+	quoted bool
 }
 
 func (e *encodeState) encodeObjectName(s string) {
@@ -113,21 +172,21 @@ func (w *reflectWithString) resolve() error {
 func (e *encodeState) encodeString(s string) {
 	l := len(s)
 	if l > LongStringSize {
-		e.encodeMarker(LongStringMarker0)
+		e.encodeMarker(LongStringMarker)
 		e.encodeUint(uint32(l))
 	} else {
-		e.encodeMarker(StringMarker0)
+		e.encodeMarker(StringMarker)
 		e.encodeUint(uint16(l))
 	}
 	e.Write([]byte(s))
 }
 
 func (e *encodeState) encodeUint(u interface{}) {
-	binary.Write(e, binary.BigEndian, u)
+	_ = binary.Write(e, binary.BigEndian, u)
 }
 
 func (e *encodeState) encodeBool(b bool) {
-	e.encodeMarker(BooleanMarker0)
+	e.encodeMarker(BooleanMarker)
 	if b {
 		e.WriteByte(1)
 	} else {
@@ -136,12 +195,12 @@ func (e *encodeState) encodeBool(b bool) {
 }
 
 func (e *encodeState) encodeFloat64(f float64) {
-	e.encodeMarker(NumberMarker0)
-	binary.Write(e, binary.BigEndian, f)
+	e.encodeMarker(NumberMarker)
+	_ = binary.Write(e, binary.BigEndian, f)
 }
 
 func (e *encodeState) encodeNull() {
-	e.WriteByte(NullMarker0)
+	e.WriteByte(NullMarker)
 }
 
 type encoderFunc func(e *encodeState, v reflect.Value, opts encOpts)
@@ -179,7 +238,15 @@ func typeEncoder(t reflect.Type) encoderFunc {
 	return f
 }
 
+var (
+	marshalerType = reflect.TypeOf((*Marshaler)(nil)).Elem()
+)
+
 func newTypeEncoder(t reflect.Type) encoderFunc {
+	if t.Implements(marshalerType) {
+		return marshalerEncoder
+	}
+
 	switch t.Kind() {
 	case reflect.String:
 		return stringEncoder
@@ -205,6 +272,27 @@ func newTypeEncoder(t reflect.Type) encoderFunc {
 		return newPtrEncoder(t)
 	default:
 		return unsupportedTypeEncoder
+	}
+}
+
+func marshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
+	if v.Kind() == reflect.Pointer && v.IsNil() {
+		e.WriteString("null")
+		return
+	}
+	m, ok := v.Interface().(Marshaler)
+	if !ok {
+		e.WriteString("null")
+		return
+	}
+	b, err := m.MarshalAMF()
+	if err == nil {
+		e.Grow(len(b))
+		out := e.AvailableBuffer()
+		e.Buffer.Write(out)
+	}
+	if err != nil {
+		e.error(&MarshalerError{v.Type(), err, "MarshalAMF"})
 	}
 }
 
@@ -280,8 +368,13 @@ func typeByIndex(t reflect.Type, index []int) reflect.Type {
 }
 
 type structEncoder struct {
-	fields    []field
-	fieldEncs []encoderFunc
+	fields structFields
+}
+
+type structFields struct {
+	list         []field
+	byExactName  map[string]*field
+	byFoldedName map[string]*field
 }
 
 // marker: 1 byte 0x03
@@ -289,28 +382,36 @@ type structEncoder struct {
 // - loop encoded string followed by encoded value
 // - terminated with empty string followed by 1 byte 0x09
 func (se *structEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
-	e.encodeMarker(ObjectMarker0)
-	for i, f := range se.fields {
-		fv := fieldByIndex(v, f.index)
-		if !fv.IsValid() {
+	e.encodeMarker(ObjectMarker)
+FieldLoop:
+	for i := range se.fields.list {
+		f := &se.fields.list[i]
+
+		// Find the nested struct field by following f.index.
+		fv := v
+		for _, i := range f.index {
+			if fv.Kind() == reflect.Pointer {
+				if fv.IsNil() {
+					continue FieldLoop
+				}
+				fv = fv.Elem()
+			}
+			fv = fv.Field(i)
+		}
+
+		if f.omitEmpty && isEmptyValue(fv) {
 			continue
 		}
+		opts.quoted = f.quoted
 		e.encodeObjectName(f.name)
-		se.fieldEncs[i](e, fv, opts)
+		f.encoder(e, fv, opts)
 	}
 	e.encodeObjectName("")
-	e.encodeMarker(ObjectEndMarker0)
+	e.encodeMarker(ObjectEndMarker)
 }
 
 func newStructEncoder(t reflect.Type) encoderFunc {
-	fields := cachedTypeFields(t)
-	se := &structEncoder{
-		fields:    fields,
-		fieldEncs: make([]encoderFunc, len(fields)),
-	}
-	for i, f := range fields {
-		se.fieldEncs[i] = typeEncoder(typeByIndex(t, f.index))
-	}
+	se := structEncoder{fields: cachedTypeFields(t)}
 	return se.encode
 }
 
@@ -334,13 +435,13 @@ func (mae *mapEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 	}
 	sort.Slice(sv, func(i, j int) bool { return sv[i].s < sv[j].s })
 
-	e.encodeMarker(ObjectMarker0)
+	e.encodeMarker(ObjectMarker)
 	for _, kv := range sv {
 		e.encodeObjectName(kv.s)
 		mae.elemEnc(e, v.MapIndex(kv.v), opts)
 	}
 	e.encodeObjectName("")
-	e.encodeMarker(ObjectEndMarker0)
+	e.encodeMarker(ObjectEndMarker)
 }
 
 func newMapEncoder(t reflect.Type) encoderFunc {
@@ -382,11 +483,11 @@ type arrayEncoder struct {
 // - n (length) encoded values
 func (ae *arrayEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 	if v.IsNil() || v.Len() == 0 {
-		e.encodeMarker(UndefinedMarker0)
+		e.encodeMarker(UndefinedMarker)
 		return
 	}
 
-	e.encodeMarker(StrictArrayMarker0)
+	e.encodeMarker(StrictArrayMarker)
 	e.encodeUint(uint32(v.Len()))
 	for i := 0; i < v.Len(); i++ {
 		ae.elemEnc(e, v.Index(i), opts)
@@ -427,11 +528,47 @@ func (e *UnsupportedTypeError) Error() string {
 	return "amf: unsupported type: " + e.Type.String()
 }
 
-func Encode(v any) ([]byte, error) {
+// Marshal returns the AMF encoding of v.
+//
+// Marshal traverses the value v recursively.
+// If an encountered value implements the Marshaler interface
+// and is not a nil pointer, Marshal calls its MarshalAMF method
+// to produce AMF.
+//
+// Otherwise, Marshal uses the following type-dependent default encodings:
+//
+// Boolean values encode as AMF booleans.
+//
+// Floating point, integer, and Number values encode as AMF numbers.
+//
+// String values encode as AMF strings coerced to valid UTF-8,
+// replacing invalid bytes with the Unicode replacement rune.
+//
+// Array and slice values encode as AMF arrays, except that
+// []byte encodes as a base64-encoded string, and a nil slice
+// encodes as the null AMF value.
+//
+// Struct, Map values encode as AMF objects.
+// Each exported struct field becomes a member of the object.
+//
+// Pointer values encode as the value pointed to.
+// A nil pointer encodes as the null AMF value.
+//
+// Interface values encode as the value contained in the interface.
+// A nil interface value encodes as the null AMF value.
+//
+// Channel, complex, and function values cannot be encoded in AMF.
+// Attempting to encode such a value causes Marshal to return
+// an UnsupportedTypeError.
+//
+// AMF cannot represent cyclic data structures and Marshal does not
+// handle them. Passing cyclic structures to Marshal will result in
+// an error.
+func Marshal(v any) ([]byte, error) {
 	e := newEncodeState()
 	defer encodeStatePool.Put(e)
 
-	err := e.encode(v, encOpts{})
+	err := e.marshal(v, encOpts{})
 	if err != nil {
 		return nil, err
 	}
@@ -440,14 +577,24 @@ func Encode(v any) ([]byte, error) {
 	return buf, nil
 }
 
+// Marshaler is the interface implemented by types that
+// can marshal themselves into valid AMF.
+type Marshaler interface {
+	MarshalAMF() ([]byte, error)
+}
+
 // A field represents a single field found in a struct.
 type field struct {
 	name      string
 	nameBytes []byte // []byte(name)
 
-	tag   bool
-	index []int
-	typo  reflect.Type
+	tag       bool
+	index     []int
+	typ       reflect.Type
+	omitEmpty bool
+	quoted    bool
+
+	encoder encoderFunc
 }
 
 func fillField(f field) field {
@@ -474,15 +621,21 @@ func (x byIndex) Less(i, j int) bool {
 	return len(x[i].index) < len(x[j].index)
 }
 
-func typeFields(t reflect.Type) []field {
-	current := []field{}
-	next := []field{{typo: t}}
+// typeFields returns a list of fields that AMF should recognize for the given type.
+// The algorithm is breadth-first search over the set of structs to include - the top struct
+// and then any reachable anonymous structs.
+func typeFields(t reflect.Type) structFields {
+	// Anonymous fields to explore at the current level and the next.
+	var current []field
+	next := []field{{typ: t}}
 
-	count := map[reflect.Type]int{}
-	nextCount := map[reflect.Type]int{}
+	// Count of queued names for current level and the next.
+	var count, nextCount map[reflect.Type]int
 
+	// Types already visited at an earlier level.
 	visited := map[reflect.Type]bool{}
 
+	// Fields found.
 	var fields []field
 
 	for len(next) > 0 {
@@ -490,21 +643,34 @@ func typeFields(t reflect.Type) []field {
 		count, nextCount = nextCount, map[reflect.Type]int{}
 
 		for _, f := range current {
-			if visited[f.typo] {
+			if visited[f.typ] {
 				continue
 			}
-			visited[f.typo] = true
+			visited[f.typ] = true
 
-			for i := 0; i < f.typo.NumField(); i++ {
-				sf := f.typo.Field(i)
-				if sf.PkgPath != "" {
+			// Scan f.typ for fields to include.
+			for i := 0; i < f.typ.NumField(); i++ {
+				sf := f.typ.Field(i)
+				if sf.Anonymous {
+					t := sf.Type
+					if t.Kind() == reflect.Pointer {
+						t = t.Elem()
+					}
+					if !sf.IsExported() && t.Kind() != reflect.Struct {
+						// Ignore embedded fields of unexported non-struct types.
+						continue
+					}
+					// Do not ignore embedded fields of unexported struct types
+					// since they may have exported fields.
+				} else if !sf.IsExported() {
+					// Ignore unexported non-embedded fields.
 					continue
 				}
 				tag := sf.Tag.Get("amf")
 				if tag == "-" {
 					continue
 				}
-				name := tag
+				name, opts := parseTag(tag)
 				if !isValidTag(name) {
 					name = ""
 				}
@@ -513,30 +679,55 @@ func typeFields(t reflect.Type) []field {
 				index[len(f.index)] = i
 
 				ft := sf.Type
-				if ft.Name() == "" && ft.Kind() == reflect.Ptr {
+				if ft.Name() == "" && ft.Kind() == reflect.Pointer {
+					// Follow pointer.
 					ft = ft.Elem()
 				}
 
+				// Only strings, floats, integers, and booleans can be quoted.
+				quoted := false
+				if opts.Contains("string") {
+					switch ft.Kind() {
+					case reflect.Bool,
+						reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+						reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+						reflect.Float32, reflect.Float64,
+						reflect.String:
+						quoted = true
+					}
+				}
+
+				// Record found field and index sequence.
 				if name != "" || !sf.Anonymous || ft.Kind() != reflect.Struct {
 					tagged := name != ""
 					if name == "" {
 						name = sf.Name
 					}
-					fields = append(fields, fillField(field{
-						name:  name,
-						tag:   tagged,
-						index: index,
-						typo:  ft,
-					}))
-					if count[f.typo] > 1 {
+					field := field{
+						name:      name,
+						tag:       tagged,
+						index:     index,
+						typ:       ft,
+						omitEmpty: opts.Contains("omitempty"),
+						quoted:    quoted,
+					}
+					field.nameBytes = []byte(field.name)
+
+					fields = append(fields, field)
+					if count[f.typ] > 1 {
+						// If there were multiple instances, add a second,
+						// so that the annihilation code will see a duplicate.
+						// It only cares about the distinction between 1 or 2,
+						// so don't bother generating any more copies.
 						fields = append(fields, fields[len(fields)-1])
 					}
 					continue
 				}
 
+				// Record new anonymous struct to explore in next round.
 				nextCount[ft]++
 				if nextCount[ft] == 1 {
-					next = append(next, fillField(field{name: ft.Name(), index: index, typo: ft}))
+					next = append(next, field{name: ft.Name(), index: index, typ: ft})
 				}
 			}
 		}
@@ -544,6 +735,9 @@ func typeFields(t reflect.Type) []field {
 
 	sort.Slice(fields, func(i, j int) bool {
 		x := fields
+		// sort field by name, breaking ties with depth, then
+		// breaking ties with "name came from amf tag", then
+		// breaking ties with index sequence.
 		if x[i].name != x[j].name {
 			return x[i].name < x[j].name
 		}
@@ -556,8 +750,16 @@ func typeFields(t reflect.Type) []field {
 		return byIndex(x).Less(i, j)
 	})
 
+	// Delete all fields that are hidden by the Go rules for embedded fields,
+	// except that fields with JSON tags are promoted.
+
+	// The fields are sorted in primary order of name, secondary order
+	// of field index length. Loop over names; for each name, delete
+	// hidden fields by choosing the one dominant field that survives.
 	out := fields[:0]
 	for advance, i := 0, 0; i < len(fields); i += advance {
+		// One iteration per name.
+		// Find the sequence of fields with the name of this first field.
 		fi := fields[i]
 		name := fi.name
 		for advance = 1; i+advance < len(fields); advance++ {
@@ -579,7 +781,20 @@ func typeFields(t reflect.Type) []field {
 	fields = out
 	sort.Sort(byIndex(fields))
 
-	return fields
+	for i := range fields {
+		f := &fields[i]
+		f.encoder = typeEncoder(typeByIndex(t, f.index))
+	}
+	exactNameIndex := make(map[string]*field, len(fields))
+	foldedNameIndex := make(map[string]*field, len(fields))
+	for i, field := range fields {
+		exactNameIndex[field.name] = &fields[i]
+		// For historical reasons, first folded match takes precedence.
+		if _, ok := foldedNameIndex[string(foldName(field.nameBytes))]; !ok {
+			foldedNameIndex[string(foldName(field.nameBytes))] = &fields[i]
+		}
+	}
+	return structFields{fields, exactNameIndex, foldedNameIndex}
 }
 
 func dominantField(fields []field) (field, bool) {
@@ -608,31 +823,13 @@ func dominantField(fields []field) (field, bool) {
 	return fields[0], true
 }
 
-var fieldCache struct {
-	value atomic.Value // map[reflect.Type][]field
-	mu    sync.Mutex   // used only by writers
-}
+var fieldCache sync.Map // map[reflect.Type]structFields
 
-func cachedTypeFields(t reflect.Type) []field {
-	m, _ := fieldCache.value.Load().(map[reflect.Type][]field)
-	f := m[t]
-	if f != nil {
-		return f
+// cachedTypeFields is like typeFields but uses a cache to avoid repeated work.
+func cachedTypeFields(t reflect.Type) structFields {
+	if f, ok := fieldCache.Load(t); ok {
+		return f.(structFields)
 	}
-
-	f = typeFields(t)
-	if f == nil {
-		f = []field{}
-	}
-
-	fieldCache.mu.Lock()
-	m, _ = fieldCache.value.Load().(map[reflect.Type][]field)
-	newM := make(map[reflect.Type][]field, len(m)+1)
-	for k, v := range m {
-		newM[k] = v
-	}
-	newM[t] = f
-	fieldCache.value.Store(newM)
-	fieldCache.mu.Unlock()
-	return f
+	f, _ := fieldCache.LoadOrStore(t, typeFields(t))
+	return f.(structFields)
 }

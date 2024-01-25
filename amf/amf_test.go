@@ -1,163 +1,248 @@
 package amf
 
 import (
-	"fmt"
+	"github.com/mitchellh/mapstructure"
+	"github.com/stretchr/testify/require"
 	"testing"
 )
 
-func TestEncodeInt(t *testing.T) {
-	in := uint32(20)
-	b, err := Encode(in)
+func TestInt(t *testing.T) {
+	in := 1
+	b, err := Marshal(in)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	var out uint32
-	err = Decode(b, &out)
+	var out int
+	err = Unmarshal(b, &out)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	if in == out {
-		fmt.Printf("passed: %d\n", out)
-	} else {
-		t.Error("failed!")
-	}
+	require.Equal(t, in, out)
 }
 
-func TestEncodeString(t *testing.T) {
-	in := "20"
-	b, err := Encode(in)
+func TestUInt(t *testing.T) {
+	in := uint(1)
+	b, err := Marshal(in)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	var out uint
+	err = Unmarshal(b, &out)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	require.Equal(t, in, out)
+}
+
+func TestFloat(t *testing.T) {
+	in := 1.0
+	b, err := Marshal(in)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	var out float64
+	err = Unmarshal(b, &out)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	require.Equal(t, in, out)
+}
+
+func TestString(t *testing.T) {
+	in := "1"
+	b, err := Marshal(in)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
 	var out string
-	err = Decode(b, &out)
+	err = Unmarshal(b, &out)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	if in == out {
-		fmt.Printf("passed: %s\n", out)
-	} else {
-		t.Error("failed!")
-	}
+	require.Equal(t, in, out)
 }
 
-func TestEncodeBool(t *testing.T) {
+func TestBool(t *testing.T) {
 	in := true
-	b, err := Encode(&in)
+	b, err := Marshal(&in)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	var out bool
-	err = Decode(b, &out)
+	out := false
+	err = Unmarshal(b, &out)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	if out {
-		fmt.Printf("passed: %t\n", out)
-	} else {
-		t.Error("failed!")
-	}
+	require.Equal(t, in, out)
 }
 
-type AMFStruct struct {
-	Int    int
-	String string
-	Bool   bool
+// TestStruct1 make struct as input and output type.
+func TestStruct2Struct(t *testing.T) {
+	type Struct struct {
+		Int    int    `amf:"tag_int"`
+		String string `amf:"tag_string"`
+		Bool   bool   `amf:"tag_bool"`
+		Object struct {
+			Int    int    `amf:"tag_int"`
+			String string `amf:"tag_string"`
+			Bool   bool   `amf:"tag_bool"`
+		} `amf:"tag_object"`
+	}
+
+	in := Struct{Int: 1, String: "1", Bool: true}
+	in.Object.Int = 1
+	in.Object.String = "1"
+	in.Object.Bool = true
+
+	b, err := Marshal(in)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	out := Struct{}
+	err = Unmarshal(b, &out)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	require.Equal(t, in, out)
 }
 
-func TestEncodeStruct(t *testing.T) {
-	in := AMFStruct{
-		Int:    10,
-		String: "1",
-		Bool:   true,
+// TestStruct2 make struct as input type and map as output type.
+func TestStruct2Map(t *testing.T) {
+	type Struct struct {
+		Int    int    `amf:"tag_int"`
+		String string `amf:"tag_string"`
+		Bool   bool   `amf:"tag_bool"`
+		Object struct {
+			Int    int    `amf:"tag_int"`
+			String string `amf:"tag_string"`
+			Bool   bool   `amf:"tag_bool"`
+		} `amf:"tag_object"`
 	}
 
-	b, err := Encode(in)
+	in := Struct{Int: 1, String: "1", Bool: true}
+	in.Object.Int = 1
+	in.Object.String = "1"
+	in.Object.Bool = true
+
+	b, err := Marshal(in)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	out := AMFStruct{}
-	err = Decode(b, &out)
+	m := make(map[string]interface{})
+	err = Unmarshal(b, &m)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	if in == out {
-		fmt.Printf("passed: %v\n", out)
-	} else {
-		t.Error("failed!")
+	out := Struct{}
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{TagName: "amf", Result: &out})
+	if err != nil {
+		t.Error(err)
+		return
 	}
+
+	err = decoder.Decode(m)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	require.Equal(t, in, out)
 }
 
-func TestEncodeStruct2Map(t *testing.T) {
-	in := AMFStruct{
-		Int:    10,
-		String: "1",
-		Bool:   true,
+// TestStruct3 make map as input type and struct as output type.
+func TestMap2Struct(t *testing.T) {
+	type Struct struct {
+		Int    int    `amf:"tag_int"`
+		String string `amf:"tag_string"`
+		Bool   bool   `amf:"tag_bool"`
+		Object struct {
+			Int    int    `amf:"tag_int"`
+			String string `amf:"tag_string"`
+			Bool   bool   `amf:"tag_bool"`
+		} `amf:"tag_object"`
 	}
 
-	b, err := Encode(in)
+	m := map[string]interface{}{
+		"tag_int":    1,
+		"tag_string": "1",
+		"tag_bool":   true,
+		"tag_object": map[string]interface{}{
+			"tag_int":    1,
+			"tag_string": "1",
+			"tag_bool":   true,
+		},
+	}
+	b, err := Marshal(m)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	out := make(map[string]interface{}, 4)
-	err = Decode(b, &out)
+	out := Struct{}
+	err = Unmarshal(b, &out)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	fmt.Printf("passed: %v\n", out)
+	in := Struct{}
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{TagName: "amf", Result: &in})
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	err = decoder.Decode(m)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	require.Equal(t, in, out)
 }
 
-func TestEncodeVars(t *testing.T) {
-	in := struct {
-		Name string
-		Num  int
-		Obj  AMFStruct
-	}{}
-
-	in.Name = "publish"
-	in.Num = 10
-	in.Obj = AMFStruct{
-		Int:    10,
-		String: "1",
-		Bool:   true,
-	}
-
-	b, err := Encode(&in)
+func TestSlice(t *testing.T) {
+	in := []interface{}{1.0, "1", true, map[string]interface{}{"Int": 1.0, "String": "1", "Bool": true}}
+	b, err := Marshal(in)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	out := struct {
-		Name string
-		Num  int
-		Obj  AMFStruct
-	}{}
-	err = Decode(b, &out)
+	out := []interface{}{0.0, "0", false, map[string]interface{}{}}
+	err = Unmarshal(b, &out)
 	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	fmt.Printf("passed: %s %d %v\n", out.Num, out.Num, out.Obj)
+	require.Equal(t, in, out)
 }

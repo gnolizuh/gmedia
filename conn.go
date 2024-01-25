@@ -464,13 +464,7 @@ func (c *Conn) SendSetChunkSize(cs uint32) error {
 
 func (c *Conn) SendOnBWDone() error {
 	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
-
-	v := make([]interface{}, 0)
-	v = append(v, "onBWDone")
-	v = append(v, 0)
-	v = append(v, nil)
-
-	b, _ := amf.Encode(v)
+	b, _ := amf.Marshal([]interface{}{"onBWDone", 0, nil})
 	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
 	_ = msg.prepare(nil)
@@ -503,14 +497,7 @@ func (c *Conn) SendConnectResult(trans uint32, encoding uint32) error {
 		Description:    "Connection succeeded.",
 		ObjectEncoding: encoding,
 	}
-
-	v := make([]interface{}, 0)
-	v = append(v, "_result")
-	v = append(v, trans)
-	v = append(v, obj)
-	v = append(v, inf)
-
-	b, _ := amf.Encode(v)
+	b, _ := amf.Marshal([]interface{}{"_result", trans, obj, inf})
 	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
 	_ = msg.prepare(nil)
@@ -521,14 +508,7 @@ func (c *Conn) SendConnectResult(trans uint32, encoding uint32) error {
 func (c *Conn) SendReleaseStreamResult(trans uint32) error {
 	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
 	var nullArray []uint32
-
-	v := make([]interface{}, 0)
-	v = append(v, "_result")
-	v = append(v, trans)
-	v = append(v, nil)
-	v = append(v, nullArray)
-
-	b, _ := amf.Encode(v)
+	b, _ := amf.Marshal([]interface{}{"_result", trans, nil, nullArray})
 	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
 	_ = msg.prepare(nil)
@@ -538,13 +518,7 @@ func (c *Conn) SendReleaseStreamResult(trans uint32) error {
 
 func (c *Conn) SendOnFCPublish(trans uint32) error {
 	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
-
-	v := make([]interface{}, 0)
-	v = append(v, "onFCPublish")
-	v = append(v, trans)
-	v = append(v, nil)
-
-	b, _ := amf.Encode(v)
+	b, _ := amf.Marshal([]interface{}{"onFCPublish", trans, nil})
 	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
 	_ = msg.prepare(nil)
@@ -555,14 +529,7 @@ func (c *Conn) SendOnFCPublish(trans uint32) error {
 func (c *Conn) SendFCPublishResult(trans uint32) error {
 	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
 	var nullArray []uint32
-
-	v := make([]interface{}, 0)
-	v = append(v, "_result")
-	v = append(v, trans)
-	v = append(v, nil)
-	v = append(v, nullArray)
-
-	b, _ := amf.Encode(v)
+	b, _ := amf.Marshal([]interface{}{"_result", trans, nil, nullArray})
 	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
 	_ = msg.prepare(nil)
@@ -572,14 +539,7 @@ func (c *Conn) SendFCPublishResult(trans uint32) error {
 
 func (c *Conn) SendCreateStreamResult(trans uint32, stream uint32) error {
 	msg := NewMessage(NewHeader(MessageAmf0Cmd, 3))
-
-	v := make([]interface{}, 0)
-	v = append(v, "_result")
-	v = append(v, trans)
-	v = append(v, nil)
-	v = append(v, stream)
-
-	b, _ := amf.Encode(v)
+	b, _ := amf.Marshal([]interface{}{"_result", trans, nil, stream})
 	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
 	_ = msg.prepare(nil)
