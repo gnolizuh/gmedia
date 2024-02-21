@@ -5,9 +5,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/gnolizuh/rtmp/amf"
+	"github.com/gnolizuh/gamf"
 	"io"
 	"log"
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -394,7 +395,7 @@ func (c *Conn) pumpMessage() (*Message, error) {
 		}
 	}
 
-	n = min(stm.hdr.mlen-stm.len, c.getReadChunkSize())
+	n = uint32(math.Min(float64(stm.hdr.mlen-stm.len), float64(c.getReadChunkSize())))
 	ck := c.chunkPool.Get().(*Chunk)
 	// TODO: ck need to free
 

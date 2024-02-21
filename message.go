@@ -1,12 +1,13 @@
 package rtmp
 
 import (
-	"io"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"sync"
-	"encoding/binary"
 )
 
 type Reader interface {
@@ -20,7 +21,7 @@ type Reader interface {
 type MessageType uint
 
 const (
-	MessageSetChunkSize MessageType = iota + 1     // 1
+	MessageSetChunkSize MessageType = iota + 1 // 1
 	MessageAbort
 	MessageAck
 	MessageUserControl
@@ -32,7 +33,7 @@ const (
 )
 
 const (
-	MessageAmf3Meta = iota + MessageVideo + 6      // 15
+	MessageAmf3Meta = iota + MessageVideo + 6 // 15
 	MessageAmf3Shared
 	MessageAmf3Cmd
 	MessageAmf0Meta
@@ -41,14 +42,14 @@ const (
 )
 
 const (
-	MessageAggregate = iota + MessageAmf0Cmd + 2   // 22
+	MessageAggregate = iota + MessageAmf0Cmd + 2 // 22
 	MessageMax
 )
 
 type UserMessageType uint
 
 const (
-	UserMessageStreamBegin UserMessageType = iota      // 0
+	UserMessageStreamBegin UserMessageType = iota // 0
 	UserMessageStreamEOF
 	UserMessageStreamDry
 	UserMessageStreamSetBufLen
@@ -60,14 +61,6 @@ const (
 )
 
 type CommandName string
-
-func min(n, m uint32) uint32 {
-	if n < m { return n } else { return m }
-}
-
-func max(n, m uint32) uint32 {
-	if n > m { return n } else { return m }
-}
 
 func messageType(typo MessageType) string {
 	types := []string{
@@ -109,9 +102,9 @@ var sharedBufferPool = sync.Pool{
 	},
 }
 
-// RTMP message chunk declare.
+// Chunk RTMP message chunk declare.
 type Chunk struct {
-	buf  []byte
+	buf []byte
 
 	// for reading
 	offr uint32
@@ -126,7 +119,7 @@ type Chunk struct {
 
 func newChunk(cs uint32) *Chunk {
 	return &Chunk{
-		buf: make([]byte, cs + MaxHeaderSize),
+		buf:  make([]byte, cs+MaxHeaderSize),
 		offr: MaxHeaderSize,
 		offw: MaxHeaderSize,
 		head: MaxHeaderSize,
@@ -156,14 +149,14 @@ func (ck *Chunk) Send(w io.Writer) error {
 
 func (ck *Chunk) Bytes(n uint32) []byte {
 	// assert n <= len(ck.buf[ck.off:])
-	return ck.buf[ck.offr:ck.offr+n]
+	return ck.buf[ck.offr : ck.offr+n]
 }
 
 func (ck *Chunk) Read(p []byte) (int, error) {
 	n := uint32(len(p))
 	m := uint32(len(ck.buf[ck.offr:]))
 
-	if r := min(n, m); r > 0 {
+	if r := uint32(math.Min(float64(n), float64(m))); r > 0 {
 		copy(p, ck.buf[ck.offr:ck.offr+r])
 		ck.offr += r
 		return int(r), nil
@@ -176,7 +169,7 @@ func (ck *Chunk) Write(p []byte) (int, error) {
 	n := uint32(len(p))
 	m := uint32(len(ck.buf[ck.offw:]))
 
-	if w := min(n, m); w > 0 {
+	if w := uint32(math.Min(float64(n), float64(m))); w > 0 {
 		copy(ck.buf[ck.offw:], p[:w])
 		ck.offw += w
 		return int(w), nil
@@ -203,13 +196,13 @@ func (ck *Chunk) WriteByte(c byte) error {
 	return nil
 }
 
-func (ck Chunk) Size() uint32 {
+func (ck *Chunk) Size() uint32 {
 	return ck.offw - ck.head
 }
 
 type ChunkList struct {
-	chs  []*Chunk
-	has  uint32
+	chs []*Chunk
+	has uint32
 
 	// for reading
 	offr uint32
@@ -223,8 +216,8 @@ type ChunkList struct {
 
 func newChunkList() *ChunkList {
 	return &ChunkList{
-		chs: []*Chunk{},
-		has: 0,
+		chs:  []*Chunk{},
+		has:  0,
 		offr: 0,
 		offw: 0,
 		offs: 0,
@@ -313,7 +306,7 @@ func (cl *ChunkList) WriteByte(c byte) error {
 	return io.EOF
 }
 
-func (cl ChunkList) Size() (uint32) {
+func (cl *ChunkList) Size() uint32 {
 	l := uint32(0)
 	for i := cl.offw; i < cl.has; i++ {
 		l += cl.chs[cl.offw].Size()
@@ -321,7 +314,7 @@ func (cl ChunkList) Size() (uint32) {
 	return l
 }
 
-// RTMP message declare.
+// Message RTMP message declare.
 type Message struct {
 	hdr   *Header
 	cl    *ChunkList
@@ -329,9 +322,9 @@ type Message struct {
 }
 
 func NewMessage(hdr *Header) *Message {
-	msg := Message {
-		hdr: hdr,
-		cl: newChunkList(),
+	msg := Message{
+		hdr:   hdr,
+		cl:    newChunkList(),
 		ready: false,
 	}
 	return &msg
@@ -387,7 +380,7 @@ func (m *Message) ReadUint8() (uint8, error) {
 		return 0, err
 	}
 
-	return uint8(b), nil
+	return b, nil
 }
 
 func (m *Message) Write(p []byte) (int, error) {
@@ -443,9 +436,9 @@ func (m *Message) prepare(prev *Header) error {
 		messageType(m.hdr.typo), m.hdr.typo, ft,
 		m.hdr.csid, timestamp, size, m.hdr.msid)
 
-	exttime := uint32(0)
+	ext := uint32(0)
 	if timestamp >= 0x00ffffff {
-		exttime = timestamp
+		ext = timestamp
 		timestamp = 0x00ffffff
 		hsize += 4
 	}
@@ -466,31 +459,31 @@ func (m *Message) prepare(prev *Header) error {
 	if m.hdr.csid >= 2 && m.hdr.csid <= 63 {
 		fch.buf[head] = ftt | (uint8(m.hdr.csid) & 0x3f)
 		ftsize = 1
-	} else if m.hdr.csid >= 64 &&  m.hdr.csid < 320 {
+	} else if m.hdr.csid >= 64 && m.hdr.csid < 320 {
 		fch.buf[head] = ftt
 		fch.buf[head+1] = uint8(m.hdr.csid - 64)
 		ftsize = 2
 	} else {
 		fch.buf[head] = ftt | 0x01
 		fch.buf[head+1] = uint8(m.hdr.csid - 64)
-		fch.buf[head+2] = uint8(m.hdr.csid - 64) >> 8
+		fch.buf[head+2] = uint8((m.hdr.csid - 64) >> 8)
 		ftsize = 3
 	}
 
 	head += ftsize
 	if ft <= 2 {
-		fch.buf[head]   = byte(timestamp >> 16)
+		fch.buf[head] = byte(timestamp >> 16)
 		fch.buf[head+1] = byte(timestamp >> 8)
 		fch.buf[head+2] = byte(timestamp)
 		head += 3
 		if ft <= 1 {
-			fch.buf[head]   = byte(size >> 16)
+			fch.buf[head] = byte(size >> 16)
 			fch.buf[head+1] = byte(size >> 8)
 			fch.buf[head+2] = byte(size)
 			fch.buf[head+3] = byte(m.hdr.typo)
 			head += 4
 			if ft == 0 {
-				fch.buf[head]   = byte(m.hdr.msid >> 24)
+				fch.buf[head] = byte(m.hdr.msid >> 24)
 				fch.buf[head+1] = byte(m.hdr.msid >> 16)
 				fch.buf[head+2] = byte(m.hdr.msid >> 8)
 				fch.buf[head+3] = byte(m.hdr.msid)
@@ -500,18 +493,18 @@ func (m *Message) prepare(prev *Header) error {
 	}
 
 	// extend timestamp
-	if exttime > 0 {
-		fch.buf[head]   = byte(exttime >> 24)
-		fch.buf[head+1] = byte(exttime >> 16)
-		fch.buf[head+2] = byte(exttime >> 8)
-		fch.buf[head+3] = byte(exttime)
+	if ext > 0 {
+		fch.buf[head] = byte(ext >> 24)
+		fch.buf[head+1] = byte(ext >> 16)
+		fch.buf[head+2] = byte(ext >> 8)
+		fch.buf[head+3] = byte(ext)
 	}
 
 	// set following chunk's fmt to be 3
-	for i := m.cl.offw+1; i < m.cl.has; i++ {
+	for i := m.cl.offw + 1; i < m.cl.has; i++ {
 		ch := m.cl.chs[i]
 		ch.reset(ftsize)
-		ch.buf[ch.head] = uint8(fch.buf[fch.head] | 0xc0)
+		ch.buf[ch.head] = fch.buf[fch.head] | 0xc0
 		copy(ch.buf[ch.head+1:ch.head+ftsize], fch.buf[fch.head+1:fch.head+ftsize])
 	}
 

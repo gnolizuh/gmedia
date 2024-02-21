@@ -3,7 +3,7 @@ package rtmp
 import (
 	"errors"
 	"fmt"
-	"github.com/gnolizuh/rtmp/amf"
+	"github.com/gnolizuh/gamf"
 	"log"
 	"net"
 	"time"
@@ -57,7 +57,9 @@ func (srv *Server) ListenAndServe() error {
 }
 
 func (srv *Server) Serve(l net.Listener) error {
-	defer l.Close()
+	defer func(l net.Listener) {
+		_ = l.Close()
+	}(l)
 
 	for {
 		rw, e := l.Accept()
@@ -101,7 +103,7 @@ func (sh *serverHandler) serveMessage(typo MessageType, peer *Peer) error {
 		case ServeDone:
 		case ServeDeclined:
 			if h := serverMessageHandler[typo]; h != nil {
-				h(peer)
+				_ = h(peer)
 			} else {
 				return errors.New(fmt.Sprintf("RTMP message type %d unknown", typo))
 			}
@@ -119,7 +121,7 @@ func serveUserMessage(utypo UserMessageType, peer *Peer) error {
 		case ServeDone:
 		case ServeDeclined:
 			if uh := serverUserMessageHandlers[utypo]; uh != nil {
-				uh(peer)
+				_ = uh(peer)
 			} else {
 				return errors.New(fmt.Sprintf("RTMP user message type %d unknown", utypo))
 			}
@@ -274,7 +276,7 @@ func serveAmf0Shared(peer *Peer) error {
 
 func serveAmf0Cmd(peer *Peer) error {
 	var name string
-	err := amf.DecodeWithReader(peer.Reader, &name)
+	err := amf.NewDecoder().WithReader(peer.Reader).Decode(&name)
 	if err != nil {
 		log.Println(err)
 		return err
@@ -292,8 +294,8 @@ var serverUserMessageHandlers = [UserMessageMax]UserMessageHandler{
 	serveUserPingRequest, serveUserPingResponse,
 }
 
-func serveUserStreamBegin(peer *Peer) error {
-	msid, err := peer.Reader.ReadUint32()
+func serveUserStreamBegin(p *Peer) error {
+	msid, err := p.Reader.ReadUint32()
 	if err != nil {
 		return err
 	}
@@ -303,8 +305,8 @@ func serveUserStreamBegin(peer *Peer) error {
 	return nil
 }
 
-func serveUserStreamEOF(peer *Peer) error {
-	msid, err := peer.Reader.ReadUint32()
+func serveUserStreamEOF(p *Peer) error {
+	msid, err := p.Reader.ReadUint32()
 	if err != nil {
 		return err
 	}
@@ -314,8 +316,8 @@ func serveUserStreamEOF(peer *Peer) error {
 	return nil
 }
 
-func serveUserStreamDry(peer *Peer) error {
-	msid, err := peer.Reader.ReadUint32()
+func serveUserStreamDry(p *Peer) error {
+	msid, err := p.Reader.ReadUint32()
 	if err != nil {
 		return err
 	}
@@ -325,13 +327,13 @@ func serveUserStreamDry(peer *Peer) error {
 	return nil
 }
 
-func serveUserSetBufLen(peer *Peer) error {
-	msid, err := peer.Reader.ReadUint32()
+func serveUserSetBufLen(p *Peer) error {
+	msid, err := p.Reader.ReadUint32()
 	if err != nil {
 		return err
 	}
 
-	buflen, err := peer.Reader.ReadUint32()
+	buflen, err := p.Reader.ReadUint32()
 	if err != nil {
 		return err
 	}
@@ -341,8 +343,8 @@ func serveUserSetBufLen(peer *Peer) error {
 	return nil
 }
 
-func serveUserIsRecorded(peer *Peer) error {
-	msid, err := peer.Reader.ReadUint32()
+func serveUserIsRecorded(p *Peer) error {
+	msid, err := p.Reader.ReadUint32()
 	if err != nil {
 		return err
 	}
@@ -352,8 +354,8 @@ func serveUserIsRecorded(peer *Peer) error {
 	return nil
 }
 
-func serveUserPingRequest(peer *Peer) error {
-	timestamp, err := peer.Reader.ReadUint32()
+func serveUserPingRequest(p *Peer) error {
+	timestamp, err := p.Reader.ReadUint32()
 	if err != nil {
 		return err
 	}
@@ -365,8 +367,8 @@ func serveUserPingRequest(peer *Peer) error {
 	return nil
 }
 
-func serveUserPingResponse(peer *Peer) error {
-	timestamp, err := peer.Reader.ReadUint32()
+func serveUserPingResponse(p *Peer) error {
+	timestamp, err := p.Reader.ReadUint32()
 	if err != nil {
 		return err
 	}
@@ -393,7 +395,7 @@ var serverAMFHandlers = map[string]AMFCommandHandler{
 	"pauseraw":      servePause,
 }
 
-func serveConnect(peer *Peer) error {
+func serveConnect(p *Peer) error {
 	type Object struct {
 		App            string
 		FlashVer       string
@@ -406,7 +408,7 @@ func serveConnect(peer *Peer) error {
 	}
 
 	var transactionID uint32
-	err := amf.DecodeWithReader(peer.Reader, &transactionID)
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&transactionID)
 	if err != nil {
 		return err
 	}
@@ -416,71 +418,71 @@ func serveConnect(peer *Peer) error {
 	}
 
 	var obj Object
-	err = amf.DecodeWithReader(peer.Reader, &obj)
+	err = amf.NewDecoder().WithReader(p.Reader).Decode(&obj)
 	if err != nil {
 		log.Println(err)
 		return err
 	}
 
-	if err := peer.Conn.SendAckWinSize(DefaultAckWindowSize); err != nil {
+	if err := p.Conn.SendAckWinSize(DefaultAckWindowSize); err != nil {
 		return err
 	}
-	if err := peer.Conn.SendSetPeerBandwidth(DefaultAckWindowSize, DefaultLimitDynamic); err != nil {
+	if err := p.Conn.SendSetPeerBandwidth(DefaultAckWindowSize, DefaultLimitDynamic); err != nil {
 		return err
 	}
-	if err := peer.Conn.SendSetChunkSize(DefaultSendChunkSize); err != nil {
+	if err := p.Conn.SendSetChunkSize(DefaultSendChunkSize); err != nil {
 		return err
 	}
-	if err := peer.Conn.SendOnBWDone(); err != nil {
+	if err := p.Conn.SendOnBWDone(); err != nil {
 		return err
 	}
-	if err := peer.Conn.SendConnectResult(transactionID, obj.ObjectEncoding); err != nil {
+	if err := p.Conn.SendConnectResult(transactionID, obj.ObjectEncoding); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func serveReleaseStream(peer *Peer) error {
+func serveReleaseStream(p *Peer) error {
 	var transactionID uint32
-	null := []uint32{}
-	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
+	var null []uint32
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&transactionID, &null)
 	if err != nil {
 		log.Println(err)
 		return err
 	}
 
 	var name string
-	err = amf.DecodeWithReader(peer.Reader, &name)
+	err = amf.NewDecoder().WithReader(p.Reader).Decode(&name)
 	if err != nil {
 		log.Println(err)
 		return err
 	}
 
-	if err := peer.Conn.SendReleaseStreamResult(transactionID); err != nil {
+	if err := p.Conn.SendReleaseStreamResult(transactionID); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func serveCreateStream(peer *Peer) error {
+func serveCreateStream(p *Peer) error {
 	var transactionID uint32
-	err := amf.DecodeWithReader(peer.Reader, &transactionID)
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&transactionID)
 	if err != nil {
 		return err
 	}
 
-	if err := peer.Conn.SendCreateStreamResult(transactionID, DefaultMessageStreamID); err != nil {
+	if err := p.Conn.SendCreateStreamResult(transactionID, DefaultMessageStreamID); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func serveCloseStream(peer *Peer) error {
+func serveCloseStream(p *Peer) error {
 	var stream float64
-	err := amf.DecodeWithReader(peer.Reader, &stream)
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&stream)
 	if err != nil {
 		return err
 	}
@@ -490,16 +492,16 @@ func serveCloseStream(peer *Peer) error {
 	return nil
 }
 
-func serveDeleteStream(peer *Peer) error {
+func serveDeleteStream(p *Peer) error {
 	var transactionID uint32
-	null := []uint32{}
-	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
+	var null []uint32
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var stream float64
-	err = amf.DecodeWithReader(peer.Reader, &stream)
+	err = amf.NewDecoder().WithReader(p.Reader).Decode(&stream)
 	if err != nil {
 		return err
 	}
@@ -509,40 +511,40 @@ func serveDeleteStream(peer *Peer) error {
 	return nil
 }
 
-func serveFCPublish(peer *Peer) error {
+func serveFCPublish(p *Peer) error {
 	var transactionID uint32
-	null := []uint32{}
-	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
+	var null []uint32
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var name string
-	err = amf.DecodeWithReader(peer.Reader, &name)
+	err = amf.NewDecoder().WithReader(p.Reader).Decode(&name)
 	if err != nil {
 		return err
 	}
 
-	if err := peer.Conn.SendOnFCPublish(transactionID); err != nil {
+	if err := p.Conn.SendOnFCPublish(transactionID); err != nil {
 		return err
 	}
-	if err := peer.Conn.SendFCPublishResult(transactionID); err != nil {
+	if err := p.Conn.SendFCPublishResult(transactionID); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func servePublish(peer *Peer) error {
+func servePublish(p *Peer) error {
 	var transactionID uint32
-	null := []uint32{}
-	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
+	var null []uint32
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var name, typo string
-	err = amf.DecodeWithReader(peer.Reader, &name, &typo)
+	err = amf.NewDecoder().WithReader(p.Reader).Decode(&name, &typo)
 	if err != nil {
 		return err
 	}
@@ -552,16 +554,16 @@ func servePublish(peer *Peer) error {
 	return nil
 }
 
-func servePlay(peer *Peer) error {
+func servePlay(p *Peer) error {
 	var transactionID uint32
-	null := []uint32{}
-	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
+	var null []uint32
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var name string
-	err = amf.DecodeWithReader(peer.Reader, &name)
+	err = amf.NewDecoder().WithReader(p.Reader).Decode(&name)
 	if err != nil {
 		return err
 	}
@@ -570,7 +572,7 @@ func servePlay(peer *Peer) error {
 
 	var start, duration float64
 	var reset bool
-	err = amf.DecodeWithReader(peer.Reader, &start, &duration, &reset)
+	err = amf.NewDecoder().WithReader(p.Reader).Decode(&start, &duration, &reset)
 	if err != nil {
 		return err
 	}
@@ -578,21 +580,21 @@ func servePlay(peer *Peer) error {
 	return nil
 }
 
-func servePlay2(peer *Peer) error {
+func servePlay2(p *Peer) error {
 	type Object struct {
 		Start      float64
 		StreamName string
 	}
 
 	var transactionID uint32
-	null := []uint32{}
-	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
+	var null []uint32
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var obj Object
-	err = amf.DecodeWithReader(peer.Reader, &obj)
+	err = amf.NewDecoder().WithReader(p.Reader).Decode(&obj)
 	if err != nil {
 		log.Println(err)
 		return err
@@ -603,16 +605,16 @@ func servePlay2(peer *Peer) error {
 	return nil
 }
 
-func serveSeek(peer *Peer) error {
+func serveSeek(p *Peer) error {
 	var transactionID uint32
-	null := []uint32{}
-	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
+	var null []uint32
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var offset float64
-	err = amf.DecodeWithReader(peer.Reader, &offset)
+	err = amf.NewDecoder().WithReader(p.Reader).Decode(&offset)
 	if err != nil {
 		return err
 	}
@@ -622,22 +624,20 @@ func serveSeek(peer *Peer) error {
 	return nil
 }
 
-func servePause(peer *Peer) error {
+func servePause(p *Peer) error {
 	var transactionID uint32
-	null := []uint32{}
-	err := amf.DecodeWithReader(peer.Reader, &transactionID, &null)
+	var null []uint32
+	err := amf.NewDecoder().WithReader(p.Reader).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var pause bool
 	var position float64
-	err = amf.DecodeWithReader(peer.Reader, &pause, &position)
+	err = amf.NewDecoder().WithReader(p.Reader).Decode(&pause, &position)
 	if err != nil {
 		return err
 	}
-
-	log.Println(pause, position)
 
 	return nil
 }

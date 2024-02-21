@@ -3,7 +3,6 @@ package rtmp
 import "testing"
 
 type ServerTest struct {
-
 }
 
 func (st *ServerTest) ServeNew(peer *Peer) ServeState {
@@ -24,5 +23,5 @@ func (st *ServerTest) ServeCommand(name string, peer *Peer) ServeState {
 
 func TestListenAndServe(t *testing.T) {
 	handler := &ServerTest{}
-	ListenAndServe(":1935", handler)
+	_ = ListenAndServe(":1935", handler)
 }
