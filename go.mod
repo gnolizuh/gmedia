@@ -1,4 +1,4 @@
-module github.com/gnolizuh/rtmp
+module github.com/gnolizuh/gmedia
 
 go 1.22.0
 

@@ -1,3 +1,19 @@
+//
+// Copyright [2024] [https://github.com/gnolizuh]
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
 package rtmp
 
 import (
@@ -70,10 +86,10 @@ var (
 	HandshakeResponseSize  = HandshakeChallengeSize - 1
 )
 
-type HandshakeState uint
+type ConnState uint
 
 const (
-	StateServerRecvChallenge HandshakeState = iota
+	StateServerRecvChallenge ConnState = iota
 	StateServerSendChallenge
 	StateServerRecvResponse
 	StateServerSendResponse
@@ -84,6 +100,9 @@ const (
 	StateClientSendResponse
 	StateClientRecvResponse
 	StataClientDone
+
+	StateServerNew = StateServerRecvChallenge
+	StateClientNew = StateClientSendChallenge
 )
 
 func makeDigest(b, key []byte, offs uint32) ([]byte, error) {
@@ -144,11 +163,12 @@ func makeRandom(p []byte) {
 	}
 }
 
-func (c *Conn) handshake() error {
+func (c *conn) handshake() error {
 	var err error
 	run := true
 	for run {
-		switch c.state {
+		state := ConnState(c.state.Load())
+		switch state {
 		case StateServerRecvChallenge:
 			err = c.recvChallenge(ClientPartialKey, ServerFullKey)
 		case StateServerSendChallenge:
@@ -169,20 +189,22 @@ func (c *Conn) handshake() error {
 			err = c.recvResponse()
 		case StataClientDone:
 			run = false
+		default:
+			panic("unhandled default case")
 		}
 
 		if err != nil {
 			return err
 		}
 
-		c.state++
+		c.setState(c.rwc, state+1)
 	}
 
 	return nil
 }
 
 // sendChallenge send S0 + S1
-func (c *Conn) sendChallenge(version, key []byte) error {
+func (c *conn) sendChallenge(version, key []byte) error {
 	s01 := make([]byte, HandshakeChallengeSize)
 
 	// s0, version MUST be 0x03
@@ -207,7 +229,7 @@ func (c *Conn) sendChallenge(version, key []byte) error {
 }
 
 // recvChallenge recv C0 + C1
-func (c *Conn) recvChallenge(ck, sk []byte) error {
+func (c *conn) recvChallenge(ck, sk []byte) error {
 	c01 := make([]byte, HandshakeChallengeSize)
 	if err := c.readFull(c01); err != nil {
 		return err
@@ -246,7 +268,7 @@ func (c *Conn) recvChallenge(ck, sk []byte) error {
 }
 
 // sendResponse send S2
-func (c *Conn) sendResponse() error {
+func (c *conn) sendResponse() error {
 	s2 := make([]byte, HandshakeResponseSize)
 
 	// s2
@@ -271,7 +293,7 @@ func (c *Conn) sendResponse() error {
 }
 
 // recvResponse recv C2
-func (c *Conn) recvResponse() error {
+func (c *conn) recvResponse() error {
 	// c2
 	c2 := make([]byte, HandshakeResponseSize)
 	if err := c.readFull(c2); err != nil {
