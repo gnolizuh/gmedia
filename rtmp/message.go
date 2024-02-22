@@ -351,6 +351,47 @@ func (cks *Chunks) Size() uint32 {
 	return l
 }
 
+var headerPool = sync.Pool{
+	New: func() any {
+		hdr := make([]byte, MaxHeaderSize)
+		return &hdr
+	},
+}
+
+// Header declare.
+type Header struct {
+	// Type are reserved for protocol control messages.
+	Type MessageType
+
+	// Length represents the size of the payload in bytes.
+	Length uint32
+
+	// Timestamp contains a timestamp of the message.
+	Timestamp uint32
+
+	// StreamId identifies the chunk stream of the message
+	ChunkStreamId uint32
+
+	// StreamId identifies the stream of the message
+	StreamId uint32
+
+	// Format identifies one of four format used by the chunk message header.
+	Format uint8
+}
+
+func newHeader(t MessageType, chunkStreamId uint32) *Header {
+	if v := headerPool.Get(); v != nil {
+		hdr := v.(*Header)
+		return hdr
+	}
+	return &Header{
+		Type:          t,
+		ChunkStreamId: chunkStreamId,
+	}
+}
+
+var messagePool sync.Pool
+
 // Message RTMP message declare. The message header contains
 // the following:
 //
@@ -380,26 +421,23 @@ func (cks *Chunks) Size() uint32 {
 // |                 (3 bytes)                     |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 type Message struct {
-	// Type are reserved for protocol control messages.
-	Type MessageType
+	// Header contains information of chunk message header
+	Header *Header
 
-	// Length represents the size of the payload in bytes.
-	Length uint32
-
-	// Timestamp contains a timestamp of the message.
-	Timestamp uint32
-
-	// StreamId identifies the stream of the message
-	StreamId uint32
+	Payload []Chunk
 
 	Chunks *Chunks
 }
 
-func NewMessage() *Message {
-	msg := Message{
+func newMessage(hdr *Header) *Message {
+	if v := messagePool.Get(); v != nil {
+		m := v.(*Message)
+		m.Header = hdr
+		return m
+	}
+	return &Message{
 		Chunks: newChunks(),
 	}
-	return &msg
 }
 
 func (m *Message) appendChunk(ck *Chunk) {
@@ -478,67 +516,68 @@ func (m *Message) prepare(prev *Header) error {
 	//	return nil
 	//}
 
-	if m.hdr.csid > MaxStreamsNum {
-		return errors.New(fmt.Sprintf("RTMP out chunk stream too big: %d >= %d", m.hdr.csid, MaxStreamsNum))
+	if m.Header.ChunkStreamId > MaxStreamsNum {
+		return errors.New(fmt.Sprintf("RTMP out chunk stream too big: %d >= %d",
+			m.Header.ChunkStreamId, MaxStreamsNum))
 	}
 
 	size := m.Chunks.Size()
-	timestamp := m.Timestamp
+	timestamp := m.Header.Timestamp
 
 	ft := uint8(0)
-	if prev != nil && prev.csid > 0 && m.StreamId == prev.msid {
+	if prev != nil && prev.ChunkStreamId > 0 && m.Header.StreamId == prev.StreamId {
 		ft++
-		if m.Type == prev.typo && size > 0 && size == prev.mlen {
+		if m.Header.Type == prev.Type && size > 0 && size == prev.Length {
 			ft++
-			if m.Timestamp == prev.timestamp {
+			if m.Header.Timestamp == prev.Timestamp {
 				ft++
 			}
 		}
-		timestamp = m.Timestamp - prev.timestamp
+		timestamp = m.Header.Timestamp - prev.Timestamp
 	}
 
 	if prev != nil {
-		*prev = *m.hdr
-		prev.mlen = size
+		*prev = *m.Header
+		prev.Length = size
 	}
 
-	hsize := chunkHeaderSize[ft]
+	hs := chunkHeaderSize[ft]
 
 	log.Printf("RTMP prep %s (%d) fmt=%d csid=%d timestamp=%d mlen=%d msid=%d",
-		messageType(m.Type), m.Type, ft,
-		m.hdr.csid, timestamp, size, m.StreamId)
+		m.Header.Type, m.Header.Type, ft,
+		m.Header.ChunkStreamId, timestamp, size, m.Header.StreamId)
 
 	ext := uint32(0)
 	if timestamp >= 0x00ffffff {
 		ext = timestamp
 		timestamp = 0x00ffffff
-		hsize += 4
+		hs += 4
 	}
 
-	if m.hdr.csid >= 64 {
-		hsize++
-		if m.hdr.csid >= 320 {
-			hsize++
+	if m.Header.ChunkStreamId >= 64 {
+		hs++
+		if m.Header.ChunkStreamId >= 320 {
+			hs++
 		}
 	}
 
 	fch := m.Chunks.chunks[0]
-	fch.reset(uint32(hsize))
+	fch.reset(uint32(hs))
 	head := fch.head
 
 	var ftsize uint32
 	ftt := ft << 6
-	if m.hdr.csid >= 2 && m.hdr.csid <= 63 {
-		fch.buf[head] = ftt | (uint8(m.hdr.csid) & 0x3f)
+	if m.Header.ChunkStreamId >= 2 && m.Header.ChunkStreamId <= 63 {
+		fch.buf[head] = ftt | (uint8(m.Header.ChunkStreamId) & 0x3f)
 		ftsize = 1
-	} else if m.hdr.csid >= 64 && m.hdr.csid < 320 {
+	} else if m.Header.ChunkStreamId >= 64 && m.Header.ChunkStreamId < 320 {
 		fch.buf[head] = ftt
-		fch.buf[head+1] = uint8(m.hdr.csid - 64)
+		fch.buf[head+1] = uint8(m.Header.ChunkStreamId - 64)
 		ftsize = 2
 	} else {
 		fch.buf[head] = ftt | 0x01
-		fch.buf[head+1] = uint8(m.hdr.csid - 64)
-		fch.buf[head+2] = uint8((m.hdr.csid - 64) >> 8)
+		fch.buf[head+1] = uint8(m.Header.ChunkStreamId - 64)
+		fch.buf[head+2] = uint8((m.Header.ChunkStreamId - 64) >> 8)
 		ftsize = 3
 	}
 
@@ -552,13 +591,13 @@ func (m *Message) prepare(prev *Header) error {
 			fch.buf[head] = byte(size >> 16)
 			fch.buf[head+1] = byte(size >> 8)
 			fch.buf[head+2] = byte(size)
-			fch.buf[head+3] = byte(m.Type)
+			fch.buf[head+3] = byte(m.Header.Type)
 			head += 4
 			if ft == 0 {
-				fch.buf[head] = byte(m.StreamId >> 24)
-				fch.buf[head+1] = byte(m.StreamId >> 16)
-				fch.buf[head+2] = byte(m.StreamId >> 8)
-				fch.buf[head+3] = byte(m.StreamId)
+				fch.buf[head] = byte(m.Header.StreamId >> 24)
+				fch.buf[head+1] = byte(m.Header.StreamId >> 16)
+				fch.buf[head+2] = byte(m.Header.StreamId >> 8)
+				fch.buf[head+3] = byte(m.Header.StreamId)
 				head += 4
 			}
 		}
@@ -573,14 +612,12 @@ func (m *Message) prepare(prev *Header) error {
 	}
 
 	// set following chunk's fmt to be 3
-	for i := m.cks.offw + 1; i < m.cks.has; i++ {
-		ch := m.cks.cks[i]
+	for i := m.Chunks.offw + 1; i < m.Chunks.has; i++ {
+		ch := m.Chunks.chunks[i]
 		ch.reset(ftsize)
 		ch.buf[ch.head] = fch.buf[fch.head] | 0xc0
 		copy(ch.buf[ch.head+1:ch.head+ftsize], fch.buf[fch.head+1:fch.head+ftsize])
 	}
-
-	m.ready = true
 
 	return nil
 }

@@ -24,7 +24,7 @@ var defaultServeMux ServeMux
 type ServeMux struct{}
 
 func (mux *ServeMux) findHandler(m *Message) Handler {
-	switch m.Type {
+	switch m.Header.Type {
 	case MessageTypeSetChunkSize:
 	case MessageTypeAbort:
 	case MessageTypeAck:

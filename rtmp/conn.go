@@ -16,10 +16,6 @@
 
 package rtmp
 
-import (
-	"sync"
-)
-
 const (
 	// MaxBasicHeaderSize : Basic Header (1 to 3 bytes)
 	MaxBasicHeaderSize = 3
@@ -54,30 +50,6 @@ const (
 type MessageHandler func(*Peer) error
 type UserMessageHandler func(*Peer) error
 type AMFCommandHandler func(*Peer) error
-
-// Header declare.
-type Header struct {
-	fmt       uint8
-	csid      uint32
-	timestamp uint32
-	mlen      uint32
-	typo      MessageType // typo means type, u know why.
-	msid      uint32
-}
-
-func newHeader(typo MessageType, csid uint32) *Header {
-	return &Header{
-		typo: typo,
-		csid: csid,
-	}
-}
-
-var headerPool = sync.Pool{
-	New: func() any {
-		hd := make([]byte, MaxHeaderSize)
-		return &hd
-	},
-}
 
 const (
 	AudioChunkStream = iota
