@@ -1,14 +1,30 @@
+//
+// Copyright [2024] [https://github.com/gnolizuh]
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
 package rtmp
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
-	"bytes"
-	"math/rand"
 	"encoding/binary"
-	"log"
 	"errors"
 	"fmt"
+	"log"
+	"math/rand"
 )
 
 /* RTMP handshake :
@@ -28,7 +44,7 @@ import (
 
 /* Handshake keys */
 var (
-	ServerKey = []byte {
+	ServerKey = []byte{
 		'G', 'e', 'n', 'u', 'i', 'n', 'e', ' ', 'A', 'd', 'o', 'b', 'e', ' ',
 		'F', 'l', 'a', 's', 'h', ' ', 'M', 'e', 'd', 'i', 'a', ' ',
 		'S', 'e', 'r', 'v', 'e', 'r', ' ',
@@ -39,10 +55,10 @@ var (
 		0x93, 0xB8, 0xE6, 0x36, 0xCF, 0xEB, 0x31, 0xAE,
 	}
 
-	ServerFullKey = ServerKey
+	ServerFullKey    = ServerKey
 	ServerPartialKey = ServerKey[:36]
 
-	ClientKey = []byte {
+	ClientKey = []byte{
 		'G', 'e', 'n', 'u', 'i', 'n', 'e', ' ', 'A', 'd', 'o', 'b', 'e', ' ',
 		'F', 'l', 'a', 's', 'h', ' ', 'P', 'l', 'a', 'y', 'e', 'r', ' ',
 		'0', '0', '1',
@@ -52,28 +68,28 @@ var (
 		0x93, 0xB8, 0xE6, 0x36, 0xCF, 0xEB, 0x31, 0xAE,
 	}
 
-	ClientFullKey = ClientKey
+	ClientFullKey    = ClientKey
 	ClientPartialKey = ClientKey[:30]
 
-	ServerVersion = []byte {
+	ServerVersion = []byte{
 		0x0D, 0x0E, 0x0A, 0x0D,
 	}
 
-	ClientVersion = []byte {
+	ClientVersion = []byte{
 		0x0C, 0x00, 0x0D, 0x0E,
 	}
 
 	ProtoVersion = byte('\x03')
 
-	HandshakeKeyLen = uint32(32)
+	HandshakeKeyLen        = uint32(32)
 	HandshakeChallengeSize = uint32(1537)
-	HandshakeResponseSize = HandshakeChallengeSize - 1
+	HandshakeResponseSize  = HandshakeChallengeSize - 1
 )
 
-type HandshakeState uint
+type ConnState uint
 
 const (
-	StateServerRecvChallenge HandshakeState = iota
+	StateServerRecvChallenge ConnState = iota
 	StateServerSendChallenge
 	StateServerRecvResponse
 	StateServerSendResponse
@@ -84,6 +100,9 @@ const (
 	StateClientSendResponse
 	StateClientRecvResponse
 	StataClientDone
+
+	StateServerNew = StateServerRecvChallenge
+	StateClientNew = StateClientSendChallenge
 )
 
 func makeDigest(b, key []byte, offs uint32) ([]byte, error) {
@@ -92,7 +111,7 @@ func makeDigest(b, key []byte, offs uint32) ([]byte, error) {
 		if _, err := h.Write(b[:offs]); err != nil {
 			return nil, err
 		}
-		if _, err := h.Write(b[offs + HandshakeKeyLen:]); err != nil {
+		if _, err := h.Write(b[offs+HandshakeKeyLen:]); err != nil {
 			return nil, err
 		}
 	} else {
@@ -107,7 +126,7 @@ func makeDigest(b, key []byte, offs uint32) ([]byte, error) {
 func findDigest(b, key []byte, base uint32) (bool, uint32) {
 	offs := uint32(0)
 	for n := uint32(0); n < 4; n++ {
-		offs += uint32(b[base + n])
+		offs += uint32(b[base+n])
 	}
 	offs = (offs % 728) + base + 4
 
@@ -122,9 +141,9 @@ func findDigest(b, key []byte, base uint32) (bool, uint32) {
 func writeDigest(b, key []byte, base uint32) error {
 	offs := uint32(0)
 	for n := uint32(8); n < 12; n++ {
-		offs += uint32(b[base + n])
+		offs += uint32(b[base+n])
 	}
-	offs = (offs % 728) + base + 12;
+	offs = (offs % 728) + base + 12
 
 	hs, err := makeDigest(b, key, offs)
 	if err != nil {
@@ -132,7 +151,7 @@ func writeDigest(b, key []byte, base uint32) error {
 	}
 
 	for n, h := range hs {
-		b[offs + uint32(n)] = h
+		b[offs+uint32(n)] = h
 	}
 
 	return nil
@@ -144,11 +163,12 @@ func makeRandom(p []byte) {
 	}
 }
 
-func (c *Conn) handshake() error {
+func (c *conn) handshake() error {
 	var err error
 	run := true
 	for run {
-		switch c.state {
+		state := ConnState(c.state.Load())
+		switch state {
 		case StateServerRecvChallenge:
 			err = c.recvChallenge(ClientPartialKey, ServerFullKey)
 		case StateServerSendChallenge:
@@ -169,30 +189,32 @@ func (c *Conn) handshake() error {
 			err = c.recvResponse()
 		case StataClientDone:
 			run = false
+		default:
+			panic("unhandled default case")
 		}
 
 		if err != nil {
 			return err
 		}
 
-		c.state ++
+		c.setState(c.rwc, state+1)
 	}
 
 	return nil
 }
 
-// send S0 + S1
-func (c *Conn) sendChallenge(version, key []byte) error {
+// sendChallenge send S0 + S1
+func (c *conn) sendChallenge(version, key []byte) error {
 	s01 := make([]byte, HandshakeChallengeSize)
 
 	// s0, version MUST be 0x03
 	s01[0] = ProtoVersion
 
 	// s1
-	binary.BigEndian.PutUint32(s01[1:5], c.epoch)  // timestamp
-	copy(s01[5:9], version)                        // version(zero)
+	binary.BigEndian.PutUint32(s01[1:5], c.epoch) // timestamp
+	copy(s01[5:9], version)                       // version(zero)
 
-	makeRandom(s01[9:])                            // random
+	makeRandom(s01[9:]) // random
 	err := writeDigest(s01[1:], key, 0)
 	if err != nil {
 		return err
@@ -206,8 +228,8 @@ func (c *Conn) sendChallenge(version, key []byte) error {
 	return c.bufWriter.Flush()
 }
 
-// recv C0 + C1
-func (c *Conn) recvChallenge(ckey, skey []byte) error {
+// recvChallenge recv C0 + C1
+func (c *conn) recvChallenge(ck, sk []byte) error {
 	c01 := make([]byte, HandshakeChallengeSize)
 	if err := c.readFull(c01); err != nil {
 		return err
@@ -227,9 +249,9 @@ func (c *Conn) recvChallenge(ckey, skey []byte) error {
 		return nil
 	}
 
-	find, offs := findDigest(c01[1:], ckey, 772)
+	find, offs := findDigest(c01[1:], ck, 772)
 	if !find {
-		find, offs = findDigest(c01[1:], ckey, 8)
+		find, offs = findDigest(c01[1:], ck, 8)
 	}
 
 	if !find {
@@ -237,7 +259,7 @@ func (c *Conn) recvChallenge(ckey, skey []byte) error {
 	}
 
 	var err error
-	c.digest, err = makeDigest(c01[1 + offs:], skey, offs)
+	c.digest, err = makeDigest(c01[1+offs:], sk, offs)
 	if err != nil {
 		return err
 	}
@@ -245,8 +267,8 @@ func (c *Conn) recvChallenge(ckey, skey []byte) error {
 	return nil
 }
 
-// send S2
-func (c *Conn) sendResponse() error {
+// sendResponse send S2
+func (c *conn) sendResponse() error {
 	s2 := make([]byte, HandshakeResponseSize)
 
 	// s2
@@ -259,7 +281,7 @@ func (c *Conn) sendResponse() error {
 	}
 
 	for n, h := range hs {
-		s2[offs + uint32(n)] = h
+		s2[offs+uint32(n)] = h
 	}
 
 	_, err = c.bufWriter.Write(s2)
@@ -270,8 +292,8 @@ func (c *Conn) sendResponse() error {
 	return c.bufWriter.Flush()
 }
 
-// recv C2
-func (c *Conn) recvResponse() error {
+// recvResponse recv C2
+func (c *conn) recvResponse() error {
 	// c2
 	c2 := make([]byte, HandshakeResponseSize)
 	if err := c.readFull(c2); err != nil {

@@ -14,30 +14,26 @@
 // limitations under the License.
 //
 
-package amf
+package rtmp
 
-// https://rtmp.veriskope.com/pdf/amf0-file-format-specification.pdf
-const (
-	NumberMarker = iota
-	BooleanMarker
-	StringMarker
-	ObjectMarker
-	MovieClipMarker
-	NullMarker
-	UndefinedMarker
-	ReferenceMarker
-	ECMAArrayMarker
-	ObjectEndMarker
-	StrictArrayMarker
-	DateMarker
-	LongStringMarker
-	UnsupportedMarker
-	RecordSetMarker
-	XMLDocumentMarker
-	TypedObjectMarker
-	ACMPlusObjectMarker
-)
+type Peer struct {
+	// RemoteAddr allows RTMP servers and other software to record
+	// the network address present by remote peer, usually for
+	// logging. The RTMP server in this package sets RemoteAddr to
+	// an "IP:port" address before invoking a handler.
+	//
+	// This field is ignored by the RTMP client.
+	RemoteAddr string
 
-const (
-	LongStringSize = 0xffff
-)
+	// Message is the RTMP message reader.
+	//
+	// Peer always carry out last message sent from remote peer.
+	Reader Reader
+
+	// conn
+	conn *conn
+}
+
+func (p *Peer) setReader(reader Reader) {
+	p.Reader = reader
+}
