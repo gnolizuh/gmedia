@@ -5,8 +5,8 @@ import "testing"
 type ServerTest struct {
 }
 
-func (st *ServerTest) ServeRTMP(m *Message) {
-	return
+func (st *ServerTest) ServeMessage(m *Message) error {
+	return nil
 }
 
 func TestListenAndServe(t *testing.T) {

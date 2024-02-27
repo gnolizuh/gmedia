@@ -29,9 +29,9 @@ import (
 type Reader interface {
 	Read(b []byte) (int, error)
 	ReadByte() (byte, error)
-	ReadUint32() (uint32, error)
-	ReadUint16() (uint16, error)
-	ReadUint8() (uint8, error)
+	ReadUInt32() (uint32, error)
+	ReadUInt16() (uint16, error)
+	ReadUInt8() (uint8, error)
 }
 
 // see https://rtmp.veriskope.com/docs/spec/#51message-format
@@ -82,6 +82,10 @@ const (
 	MessageTypeMax
 )
 
+const (
+	MaxChunkSize = 10485760
+)
+
 func (mt MessageType) String() string {
 	types := []string{
 		"?",
@@ -129,8 +133,6 @@ const (
 	UserMessagePingResponse
 	UserMessageMax
 )
-
-type CommandName string
 
 // Chunk RTMP message chunk declare.
 type Chunk struct {
@@ -540,6 +542,7 @@ var messagePool sync.Pool
 // |                 (3 bytes)                     |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 type Message struct {
+	conn   *conn
 	Header *Header
 	Chunks *Chunks
 }
@@ -578,7 +581,7 @@ func (m *Message) ReadByte() (byte, error) {
 	return m.Chunks.ReadByte()
 }
 
-func (m *Message) ReadUint32() (uint32, error) {
+func (m *Message) ReadUInt32() (uint32, error) {
 	var b uint32
 	err := binary.Read(m, binary.BigEndian, &b)
 	if err != nil {
@@ -588,7 +591,7 @@ func (m *Message) ReadUint32() (uint32, error) {
 	return b, nil
 }
 
-func (m *Message) ReadUint16() (uint16, error) {
+func (m *Message) ReadUInt16() (uint16, error) {
 	var b uint16
 	err := binary.Read(m, binary.BigEndian, &b)
 	if err != nil {
@@ -598,7 +601,7 @@ func (m *Message) ReadUint16() (uint16, error) {
 	return b, nil
 }
 
-func (m *Message) ReadUint8() (uint8, error) {
+func (m *Message) ReadUInt8() (uint8, error) {
 	b, err := m.ReadByte()
 	if err != nil {
 		return 0, err

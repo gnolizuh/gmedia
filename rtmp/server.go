@@ -44,7 +44,7 @@ type tcpKeepAliveListener struct {
 //}
 
 type Handler interface {
-	ServeRTMP(*Message)
+	ServeMessage(*Message) error
 }
 
 type Server struct {
@@ -52,7 +52,12 @@ type Server struct {
 	// in the form "host:port". If empty, ":rtmp" (port 1935) is used.
 	Addr string
 
-	Handler Handler // handler to invoke, http.DefaultServeMux if nil
+	// Handler to invoke, rtmp.DefaultServeMux if nil
+	Handler Handler
+
+	// If Handler is set, the TypeHandlers is never used. Otherwise, look for
+	// the correct callback function in TypeHandlers.
+	TypeHandlers []TypeHandler
 
 	// ConnState specifies an optional callback function that is
 	// called when a client connection changes state. See the
@@ -62,8 +67,9 @@ type Server struct {
 
 func ListenAndServe(addr string, handler Handler) error {
 	server := &Server{
-		Addr:    addr,
-		Handler: handler,
+		Addr:         addr,
+		Handler:      handler,
+		TypeHandlers: make([]TypeHandler, MessageTypeMax),
 	}
 	return server.ListenAndServe()
 }
@@ -102,154 +108,28 @@ func (srv *Server) Serve(l net.Listener) error {
 	}
 }
 
+func (srv *Server) RegisterTypeHandler(typ MessageType, th TypeHandler) {
+	if typ < MessageTypeMax {
+		srv.TypeHandlers[typ] = th
+	}
+}
+
 // serverHandler delegates to either the server's Handler or
 // DefaultServeMux.
 type serverHandler struct {
 	srv *Server
 }
 
-func (sh *serverHandler) ServeRTMP(m *Message) {
-	handler := sh.srv.Handler
-	if handler == nil {
-		handler = DefaultServeMux
+func (sh *serverHandler) ServeMessage(msg *Message) error {
+	h := sh.srv.Handler
+	if h == nil {
+		th := sh.srv.TypeHandlers[msg.Header.MessageTypeId]
+		if th != nil {
+			return th(msg)
+		}
+		h = DefaultServeMux
 	}
-	//handler.ServeMessage(m)
-}
-
-var serverMessageHandler = [MessageTypeMax]MessageHandler{
-	nil,
-	serveSetChunkSize, serveAbort, serveAck, serveUserControl,
-	serveWinAckSize, serveSetPeerBandwidth, serveEdge,
-	serveAudio, serveVideo,
-	nil, nil, nil, nil, nil,
-	serveAMF3Meta, serveAMF3Shared, serveAMF3Cmd,
-	serveAMF0Meta, serveAMF0Shared, serveAMF0Cmd,
-	nil,
-	serveAggregate,
-}
-
-func serveSetChunkSize(p *Peer) error {
-	cs, err := p.Reader.ReadUint32()
-	if err != nil {
-		return err
-	}
-
-	log.Printf("set chunk size, cs: %d", cs)
-
-	p.conn.SetChunkSize(cs)
-
-	return nil
-}
-
-func serveAbort(p *Peer) error {
-	csid, err := p.Reader.ReadUint32()
-	if err != nil {
-		return err
-	}
-
-	log.Printf("abort, csid: %d", csid)
-
-	return nil
-}
-
-func serveAck(p *Peer) error {
-	seq, err := p.Reader.ReadUint32()
-	if err != nil {
-		return err
-	}
-
-	log.Printf("ack, seq: %d", seq)
-
-	return nil
-}
-
-func serveUserControl(p *Peer) error {
-	evt, err := p.Reader.ReadUint16()
-	if err != nil {
-		return err
-	}
-
-	umt := UserMessageType(evt)
-	if umt >= UserMessageMax {
-		return errors.New(fmt.Sprintf("user message type out of range: %d", umt))
-	}
-
-	return nil
-}
-
-func serveWinAckSize(p *Peer) error {
-	win, err := p.Reader.ReadUint32()
-	if err != nil {
-		return err
-	}
-
-	log.Printf("ack window size, win: %d", win)
-
-	p.conn.ackWinSize = win
-
-	return nil
-}
-
-func serveSetPeerBandwidth(p *Peer) error {
-	bandwidth, err := p.Reader.ReadUint32()
-	if err != nil {
-		return err
-	}
-
-	limit, err := p.Reader.ReadUint8()
-	if err != nil {
-		return err
-	}
-
-	log.Printf("set peer bandwidth, bandwidth: %d, limit: %d", bandwidth, limit)
-
-	return nil
-}
-
-func serveEdge(p *Peer) error {
-	return nil
-}
-
-func serveAudio(p *Peer) error {
-	return nil
-}
-
-func serveVideo(p *Peer) error {
-	return nil
-}
-
-func serveAMF3Meta(p *Peer) error {
-	return nil
-}
-
-func serveAMF3Shared(p *Peer) error {
-	return nil
-}
-
-func serveAMF3Cmd(p *Peer) error {
-	return nil
-}
-
-func serveAMF0Meta(p *Peer) error {
-	return nil
-}
-
-func serveAMF0Shared(p *Peer) error {
-	return nil
-}
-
-func serveAMF0Cmd(p *Peer) error {
-	var name string
-	err := amf.NewDecoder().WithReader(p.Reader).Decode(&name)
-	if err != nil {
-		log.Println(err)
-		return err
-	}
-	return nil
-}
-
-func serveAggregate(p *Peer) error {
-	return nil
+	return h.ServeMessage(msg)
 }
 
 var serverUserMessageHandlers = [UserMessageMax]UserMessageHandler{
@@ -259,7 +139,7 @@ var serverUserMessageHandlers = [UserMessageMax]UserMessageHandler{
 }
 
 func serveUserStreamBegin(p *Peer) error {
-	msid, err := p.Reader.ReadUint32()
+	msid, err := p.Reader.ReadUInt32()
 	if err != nil {
 		return err
 	}
@@ -270,7 +150,7 @@ func serveUserStreamBegin(p *Peer) error {
 }
 
 func serveUserStreamEOF(p *Peer) error {
-	msid, err := p.Reader.ReadUint32()
+	msid, err := p.Reader.ReadUInt32()
 	if err != nil {
 		return err
 	}
@@ -281,7 +161,7 @@ func serveUserStreamEOF(p *Peer) error {
 }
 
 func serveUserStreamDry(p *Peer) error {
-	msid, err := p.Reader.ReadUint32()
+	msid, err := p.Reader.ReadUInt32()
 	if err != nil {
 		return err
 	}
@@ -292,12 +172,12 @@ func serveUserStreamDry(p *Peer) error {
 }
 
 func serveUserSetBufLen(p *Peer) error {
-	msid, err := p.Reader.ReadUint32()
+	msid, err := p.Reader.ReadUInt32()
 	if err != nil {
 		return err
 	}
 
-	buflen, err := p.Reader.ReadUint32()
+	buflen, err := p.Reader.ReadUInt32()
 	if err != nil {
 		return err
 	}
@@ -308,7 +188,7 @@ func serveUserSetBufLen(p *Peer) error {
 }
 
 func serveUserIsRecorded(p *Peer) error {
-	msid, err := p.Reader.ReadUint32()
+	msid, err := p.Reader.ReadUInt32()
 	if err != nil {
 		return err
 	}
@@ -319,7 +199,7 @@ func serveUserIsRecorded(p *Peer) error {
 }
 
 func serveUserPingRequest(p *Peer) error {
-	timestamp, err := p.Reader.ReadUint32()
+	timestamp, err := p.Reader.ReadUInt32()
 	if err != nil {
 		return err
 	}
@@ -332,7 +212,7 @@ func serveUserPingRequest(p *Peer) error {
 }
 
 func serveUserPingResponse(p *Peer) error {
-	timestamp, err := p.Reader.ReadUint32()
+	timestamp, err := p.Reader.ReadUInt32()
 	if err != nil {
 		return err
 	}
@@ -697,14 +577,17 @@ func (c *conn) serve() {
 	}
 
 	for {
-		m, err := c.readMessage()
+		msg, err := c.readMessage()
 		if err != nil {
 			panic(err)
 			return
 		}
 
 		sh := serverHandler{c.server}
-		sh.ServeRTMP(m)
+		if err = sh.ServeMessage(msg); err != nil {
+			panic(err)
+			return
+		}
 	}
 }
 
@@ -712,6 +595,7 @@ func (c *conn) SetChunkSize(chunkSize uint32) {
 	if c.chunkSize != chunkSize {
 		c.chunkSize = chunkSize
 	}
+	// TODO: copy old chunks to new chunks.
 }
 
 func (c *conn) getReadChunkSize() uint32 {
@@ -743,117 +627,6 @@ func (c *conn) readFull(buf []byte) (err error) {
 	}
 
 	return nil
-}
-
-func (c *conn) readBasicHeader(b []byte, hdr *Header) (uint32, error) {
-	off := uint32(0)
-	err := c.readFull(b[off : off+1])
-	if err != nil {
-		return 0, err
-	}
-
-	/*
-	 * Chunk stream IDs 2-63 can be encoded in
-	 * the 1-byte version of this field.
-	 *
-	 *  0 1 2 3 4 5 6 7
-	 * +-+-+-+-+-+-+-+-+
-	 * |fmt|   cs id   |
-	 * +-+-+-+-+-+-+-+-+
-	 */
-	hdr.Format = uint8(b[off]>>6) & 0x03
-	hdr.ChunkStreamId = uint32(uint8(b[off]) & 0x3f)
-
-	off += 1
-	if hdr.ChunkStreamId == 0 {
-		/*
-		 * ID is computed as (the second byte + 64).
-		 *
-		 *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
-		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-		 * |fmt|     0     |  cs id - 64   |
-		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-		 */
-		hdr.ChunkStreamId = 64
-		err := c.readFull(b[off : off+1])
-		if err != nil {
-			return 0, err
-		}
-		hdr.ChunkStreamId += uint32(b[off])
-		off += 1
-	} else if hdr.ChunkStreamId == 1 {
-		/*
-		 * ID is computed as ((the third byte)*256 +
-		 * (the second byte) + 64).
-		 *
-		 *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
-		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-		 * |fmt|     1     |           cs id - 64          |
-		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-		 */
-		hdr.ChunkStreamId = 64
-		err := c.readFull(b[off : off+2])
-		if err != nil {
-			return 0, err
-		}
-		hdr.ChunkStreamId += uint32(b[off])
-		hdr.ChunkStreamId += 256 * uint32(b[off+1])
-		off += 2
-	}
-
-	return off, nil
-}
-
-func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
-	//  0                   1                   2                   3
-	//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	// |                   timestamp                   |message length |
-	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	// |     message length (cont)     |message type id| msg stream id |
-	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	// |           message stream id (cont)            |
-	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	off := uint32(0)
-	if hdr.Format <= 2 {
-		err := c.readFull(b[off : off+3])
-		if err != nil {
-			return 0, err
-		}
-		hdr.Timestamp = uint32(b[off+2]) | uint32(b[off+1])<<8 | uint32(b[off])<<16
-		off += 3
-
-		if hdr.Format <= 1 {
-			err := c.readFull(b[off : off+4])
-			if err != nil {
-				return 0, err
-			}
-			hdr.MessageStreamId = uint32(b[off+2]) | uint32(b[off+1])<<8 | uint32(b[off])<<16
-			off += 3
-			hdr.MessageTypeId = MessageType(b[off])
-			off += 1
-
-			if hdr.Format == 0 {
-				err := c.readFull(b[off : off+4])
-				if err != nil {
-					return 0, err
-				}
-				hdr.MessageStreamId = binary.BigEndian.Uint32(b[off : off+4])
-				off += 4
-			}
-		}
-	}
-
-	if hdr.Timestamp == 0x00ffffff {
-		err := c.readFull(b[off : off+4])
-		if err != nil {
-			return 0, err
-		}
-		hdr.Timestamp = binary.BigEndian.Uint32(b[off : off+4])
-		off += 4
-	}
-
-	return off, nil
 }
 
 func (c *conn) readChunk() (*Chunk, *Header, error) {
