@@ -132,12 +132,6 @@ const (
 
 type CommandName string
 
-var chunkPool = sync.Pool{
-	New: func() any {
-		return newChunk(DefaultChunkSize)
-	},
-}
-
 // Chunk RTMP message chunk declare.
 type Chunk struct {
 	buf []byte
@@ -153,93 +147,99 @@ type Chunk struct {
 	offs uint32
 }
 
-func newChunk(cs uint32) *Chunk {
+var chunkPool sync.Pool
+
+func newChunk(chunkSize uint32) *Chunk {
+	if v := chunkPool.Get(); v != nil {
+		chunk := v.(*Chunk)
+		return chunk
+	}
 	return &Chunk{
-		buf:  make([]byte, cs+MaxHeaderSize),
-		offr: MaxHeaderSize,
-		offw: MaxHeaderSize,
-		head: MaxHeaderSize,
-		offs: MaxHeaderSize,
+		buf:  make([]byte, chunkSize+MaxHeaderBufferSize),
+		offr: MaxHeaderBufferSize,
+		offw: MaxHeaderBufferSize,
+		head: MaxHeaderBufferSize,
+		offs: MaxHeaderBufferSize,
 	}
 }
 
-func (ck *Chunk) reset(n uint32) {
-	if n > ck.head {
-		panic(fmt.Sprintf("chunk reset overflow: %d > %d", n, ck.head))
+func (chunk *Chunk) reset(n uint32) {
+	if n > chunk.head {
+		panic(fmt.Sprintf("chunk reset overflow: %d > %d", n, chunk.head))
 	}
 
-	ck.head -= n
-	ck.offs = ck.head
+	chunk.head -= n
+	chunk.offs = chunk.head
 }
 
-func (ck *Chunk) Send(w io.Writer) error {
-	for ck.offs < ck.offw {
-		n, err := w.Write(ck.buf[ck.offs:ck.offw])
+func (chunk *Chunk) Send(w io.Writer) error {
+	for chunk.offs < chunk.offw {
+		n, err := w.Write(chunk.buf[chunk.offs:chunk.offw])
 		if err != nil {
 			return err
 		}
-		ck.offs += uint32(n)
+		chunk.offs += uint32(n)
 	}
 	return nil
 }
 
-func (ck *Chunk) Bytes(n uint32) []byte {
-	// assert n <= len(ck.buf[ck.off:])
-	return ck.buf[ck.offr : ck.offr+n]
+func (chunk *Chunk) Bytes(n uint32) []byte {
+	// assert n <= len(chunk.buf[chunk.off:])
+	return chunk.buf[chunk.offr : chunk.offr+n]
 }
 
-func (ck *Chunk) Read(p []byte) (int, error) {
+func (chunk *Chunk) Read(p []byte) (int, error) {
 	n := uint32(len(p))
-	m := uint32(len(ck.buf[ck.offr:]))
+	m := uint32(len(chunk.buf[chunk.offr:]))
 
 	if r := uint32(math.Min(float64(n), float64(m))); r > 0 {
-		copy(p, ck.buf[ck.offr:ck.offr+r])
-		ck.offr += r
+		copy(p, chunk.buf[chunk.offr:chunk.offr+r])
+		chunk.offr += r
 		return int(r), nil
 	}
 
 	return 0, io.EOF
 }
 
-func (ck *Chunk) Write(p []byte) (int, error) {
+func (chunk *Chunk) Write(p []byte) (int, error) {
 	n := uint32(len(p))
-	m := uint32(len(ck.buf[ck.offw:]))
+	m := uint32(len(chunk.buf[chunk.offw:]))
 
 	if w := uint32(math.Min(float64(n), float64(m))); w > 0 {
-		copy(ck.buf[ck.offw:], p[:w])
-		ck.offw += w
+		copy(chunk.buf[chunk.offw:], p[:w])
+		chunk.offw += w
 		return int(w), nil
 	}
 
 	return 0, io.EOF
 }
 
-func (ck *Chunk) ReadByte() (byte, error) {
-	if len(ck.buf[ck.offr:]) <= 0 {
+func (chunk *Chunk) ReadByte() (byte, error) {
+	if len(chunk.buf[chunk.offr:]) <= 0 {
 		return 0, io.EOF
 	}
-	b := ck.buf[ck.offr]
-	ck.offr++
+	b := chunk.buf[chunk.offr]
+	chunk.offr++
 	return b, nil
 }
 
-func (ck *Chunk) WriteByte(c byte) error {
-	if ck.offw == uint32(len(ck.buf)) {
+func (chunk *Chunk) WriteByte(c byte) error {
+	if chunk.offw == uint32(len(chunk.buf)) {
 		return io.EOF
 	}
-	ck.buf[ck.offw] = c
-	ck.offw++
+	chunk.buf[chunk.offw] = c
+	chunk.offw++
 	return nil
 }
 
-func (ck *Chunk) Size() uint32 {
-	return ck.offw - ck.head
+func (chunk *Chunk) size() uint32 {
+	return chunk.offw - chunk.head
 }
 
 type Chunks struct {
 	chunks []*Chunk
 
-	has uint32
+	length uint32
 
 	// for reading
 	offr uint32
@@ -254,16 +254,20 @@ type Chunks struct {
 func newChunks() *Chunks {
 	return &Chunks{
 		chunks: []*Chunk{},
-		has:    0,
-		offr:   0,
-		offw:   0,
-		offs:   0,
 	}
 }
 
-func (cks *Chunks) appendChunk(ch *Chunk) {
-	cks.chunks = append(cks.chunks, ch)
-	cks.has++
+func (chunks *Chunks) len() uint32 {
+	return uint32(len(chunks.chunks))
+}
+
+func (chunks *Chunks) size() uint32 {
+	return chunks.length
+}
+
+func (chunks *Chunks) append(chunk *Chunk) {
+	chunks.chunks = append(chunks.chunks, chunk)
+	chunks.length += chunk.size()
 }
 
 // Read reads data into p. It returns the number of bytes
@@ -271,11 +275,11 @@ func (cks *Chunks) appendChunk(ch *Chunk) {
 // on the underlying Reader, hence n may be less than
 // len(p). At EOF, the count will be zero and err will be
 // io.EOF.
-func (cks *Chunks) Read(p []byte) (int, error) {
+func (chunks *Chunks) Read(p []byte) (int, error) {
 	l := len(p)
 	r := 0
-	for cks.offr < cks.has {
-		ch := cks.chunks[cks.offr]
+	for chunks.offr < chunks.size() {
+		ch := chunks.chunks[chunks.offr]
 		n, err := ch.Read(p[r:])
 		if err != nil {
 			return r + n, err
@@ -283,7 +287,7 @@ func (cks *Chunks) Read(p []byte) (int, error) {
 		r += n
 		l -= n
 		if len(ch.buf[ch.offr:]) == 0 {
-			cks.offr++
+			chunks.offr++
 		}
 		if l == 0 {
 			return r, nil
@@ -292,11 +296,11 @@ func (cks *Chunks) Read(p []byte) (int, error) {
 	return r, io.EOF
 }
 
-func (cks *Chunks) Write(p []byte) (int, error) {
+func (chunks *Chunks) Write(p []byte) (int, error) {
 	l := len(p)
 	w := 0
-	for cks.offw < cks.has {
-		ch := cks.chunks[cks.offw]
+	for chunks.offw < chunks.len() {
+		ch := chunks.chunks[chunks.offw]
 		n, err := ch.Write(p[w:])
 		if err != nil {
 			return w + n, err
@@ -304,7 +308,7 @@ func (cks *Chunks) Write(p []byte) (int, error) {
 		w += n
 		l -= n
 		if len(ch.buf[ch.offw:]) == 0 {
-			cks.offw++
+			chunks.offw++
 		}
 		if l == 0 {
 			return w, nil
@@ -313,81 +317,196 @@ func (cks *Chunks) Write(p []byte) (int, error) {
 	return w, io.EOF
 }
 
-func (cks *Chunks) ReadByte() (byte, error) {
-	if cks.offr < cks.has {
-		ch := cks.chunks[cks.offr]
+func (chunks *Chunks) ReadByte() (byte, error) {
+	if chunks.offr < chunks.len() {
+		ch := chunks.chunks[chunks.offr]
 		b, err := ch.ReadByte()
 		if err != nil {
 			return 0, err
 		}
 		if len(ch.buf[ch.offr:]) == 0 {
-			cks.offr++
+			chunks.offr++
 		}
 		return b, nil
 	}
 	return 0, io.EOF
 }
 
-func (cks *Chunks) WriteByte(c byte) error {
-	if cks.offw < cks.has {
-		ch := cks.chunks[cks.offw]
+func (chunks *Chunks) WriteByte(c byte) error {
+	if chunks.offw < chunks.len() {
+		ch := chunks.chunks[chunks.offw]
 		err := ch.WriteByte(c)
 		if err != nil {
 			return err
 		}
 		if len(ch.buf[ch.offw:]) == 0 {
-			cks.offw++
+			chunks.offw++
 		}
 		return nil
 	}
 	return io.EOF
 }
 
-func (cks *Chunks) Size() uint32 {
-	l := uint32(0)
-	for i := cks.offw; i < cks.has; i++ {
-		l += cks.chunks[cks.offw].Size()
-	}
-	return l
+var headerBufferPool = sync.Pool{
+	New: func() any {
+		hdr := make([]byte, MaxHeaderBufferSize)
+		return hdr
+	},
 }
 
-var headerPool = sync.Pool{
-	New: func() any {
-		hdr := make([]byte, MaxHeaderSize)
-		return &hdr
-	},
+func newHeaderBuffer() []byte {
+	if v := headerBufferPool.Get(); v != nil {
+		hdr := v.([]byte)
+		return hdr
+	}
+	return make([]byte, MaxHeaderBufferSize)
 }
 
 // Header declare.
 type Header struct {
-	// Type are reserved for protocol control messages.
-	Type MessageType
+	// MessageTypeId are reserved for protocol control messages.
+	MessageTypeId MessageType
 
-	// Length represents the size of the payload in bytes.
-	Length uint32
+	// MessageLength represents the size of the payload in bytes.
+	MessageLength uint32
 
 	// Timestamp contains a timestamp of the message.
 	Timestamp uint32
 
-	// StreamId identifies the chunk stream of the message
+	// MessageStreamId identifies the chunk stream of the message
 	ChunkStreamId uint32
 
-	// StreamId identifies the stream of the message
-	StreamId uint32
+	// MessageStreamId identifies the stream of the message
+	MessageStreamId uint32
 
 	// Format identifies one of four format used by the chunk message header.
 	Format uint8
 }
 
-func newHeader(t MessageType, chunkStreamId uint32) *Header {
+var headerPool sync.Pool
+
+func NewHeader() *Header {
 	if v := headerPool.Get(); v != nil {
 		hdr := v.(*Header)
 		return hdr
 	}
-	return &Header{
-		Type:          t,
-		ChunkStreamId: chunkStreamId,
+	return &Header{}
+}
+
+func readHeader(c *conn, hdr *Header) error {
+	buf := newHeaderBuffer()
+	defer headerBufferPool.Put(buf)
+
+	// basic header
+	off := uint32(0)
+	err := c.readFull(buf[off : off+1])
+	if err != nil {
+		return err
 	}
+
+	/*
+	 * Chunk stream IDs 2-63 can be encoded in
+	 * the 1-byte version of this field.
+	 *
+	 *  0 1 2 3 4 5 6 7
+	 * +-+-+-+-+-+-+-+-+
+	 * |fmt|   cs id   |
+	 * +-+-+-+-+-+-+-+-+
+	 */
+	hdr.Format = uint8(buf[off]>>6) & 0x03
+	hdr.ChunkStreamId = uint32(uint8(buf[off]) & 0x3f)
+
+	off += 1
+	if hdr.ChunkStreamId == 0 {
+		/*
+		 * ID is computed as (the second byte + 64).
+		 *
+		 *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 * |fmt|     0     |  cs id - 64   |
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 */
+		err := c.readFull(buf[off : off+1])
+		if err != nil {
+			return err
+		}
+		hdr.ChunkStreamId = 64
+		hdr.ChunkStreamId += uint32(buf[off])
+		off += 1
+	} else if hdr.ChunkStreamId == 1 {
+		/*
+		 * ID is computed as ((the third byte)*256 +
+		 * (the second byte) + 64).
+		 *
+		 *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 * |fmt|     1     |           cs id - 64          |
+		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		 */
+		err := c.readFull(buf[off : off+2])
+		if err != nil {
+			return err
+		}
+		hdr.ChunkStreamId = 64
+		hdr.ChunkStreamId += uint32(buf[off])
+		hdr.ChunkStreamId += 256 * uint32(buf[off+1])
+		off += 2
+	}
+
+	if hdr.ChunkStreamId > MaxStreamsNum {
+		return errors.New(fmt.Sprintf("RTMP in chunk stream too big: %d >= %d",
+			hdr.ChunkStreamId, MaxStreamsNum))
+	}
+
+	//  0                   1                   2
+	//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |               timestamp delta                 |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	if hdr.Format <= 2 {
+		err := c.readFull(buf[off : off+3])
+		if err != nil {
+			return err
+		}
+		hdr.Timestamp = uint32(buf[off+2]) | uint32(buf[off+1])<<8 | uint32(buf[off])<<16
+		off += 3
+		//  0                   1                   2                   3
+		//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+		// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		// |                timestamp delta                |message length |
+		// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		// |     message length (cont)     |message type id|
+		// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+		if hdr.Format <= 1 {
+			err := c.readFull(buf[off : off+4])
+			if err != nil {
+				return err
+			}
+			hdr.MessageLength = uint32(buf[off+2]) | uint32(buf[off+1])<<8 | uint32(buf[off])<<16
+			off += 3
+			hdr.MessageTypeId = MessageType(buf[off])
+			off += 1
+			//  0                   1                   2                   3
+			//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+			// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			// |                   timestamp                   |message length |
+			// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			// |     message length (cont)     |message type id| msg stream id |
+			// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			// |           message stream id (cont)            |
+			// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+			if hdr.Format == 0 {
+				err := c.readFull(buf[off : off+4])
+				if err != nil {
+					return err
+				}
+				hdr.MessageStreamId = binary.LittleEndian.Uint32(buf[off : off+4])
+				off += 4
+			}
+		}
+	}
+
+	return nil
 }
 
 var messagePool sync.Pool
@@ -395,11 +514,11 @@ var messagePool sync.Pool
 // Message RTMP message declare. The message header contains
 // the following:
 //
-// Message Type: One byte field to represent the message type.
+// Message MessageTypeId: One byte field to represent the message type.
 // A range of type IDs (1-6) are reserved for protocol control
 // messages.
 //
-// Length: Three-byte field that represents the size of the
+// MessageLength: Three-byte field that represents the size of the
 // payload in bytes. It is set in big-endian format.
 //
 // Timestamp: Four-byte field that contains a timestamp of
@@ -411,7 +530,7 @@ var messagePool sync.Pool
 // 0                   1                   2                   3
 // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// | Message Type  |                Payload length                 |
+// | Message MessageTypeId  |                Payload length                 |
 // |    (1 byte)   |                   (3 bytes)                   |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // |                           Timestamp                           |
@@ -421,18 +540,13 @@ var messagePool sync.Pool
 // |                 (3 bytes)                     |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 type Message struct {
-	// Header contains information of chunk message header
 	Header *Header
-
-	Payload []Chunk
-
 	Chunks *Chunks
 }
 
-func newMessage(hdr *Header) *Message {
+func newMessage() *Message {
 	if v := messagePool.Get(); v != nil {
 		m := v.(*Message)
-		m.Header = hdr
 		return m
 	}
 	return &Message{
@@ -440,18 +554,18 @@ func newMessage(hdr *Header) *Message {
 	}
 }
 
-func (m *Message) appendChunk(ck *Chunk) {
-	m.Chunks.appendChunk(ck)
+func (m *Message) append(chunk *Chunk) {
+	m.Chunks.append(chunk)
 }
 
 func (m *Message) Send(w io.Writer) error {
-	cks := m.Chunks
-	for cks.offs <= cks.offw {
-		err := cks.chunks[cks.offs].Send(w)
+	chunks := m.Chunks
+	for chunks.offs <= chunks.offw {
+		err := chunks.chunks[chunks.offs].Send(w)
 		if err != nil {
 			return err
 		}
-		cks.offs++
+		chunks.offs++
 	}
 	return nil
 }
@@ -503,8 +617,8 @@ func (m *Message) WriteByte(c byte) error {
 
 func (m *Message) alloc(n uint32) {
 	for i := (n / DefaultChunkSize) + 1; i > 0; i-- {
-		ck := chunkPool.Get().(*Chunk)
-		m.appendChunk(ck)
+		chunk := newChunk(DefaultChunkSize)
+		m.append(chunk)
 	}
 }
 
@@ -521,13 +635,13 @@ func (m *Message) prepare(prev *Header) error {
 			m.Header.ChunkStreamId, MaxStreamsNum))
 	}
 
-	size := m.Chunks.Size()
+	size := m.Chunks.size()
 	timestamp := m.Header.Timestamp
 
 	ft := uint8(0)
-	if prev != nil && prev.ChunkStreamId > 0 && m.Header.StreamId == prev.StreamId {
+	if prev != nil && prev.ChunkStreamId > 0 && m.Header.MessageStreamId == prev.MessageStreamId {
 		ft++
-		if m.Header.Type == prev.Type && size > 0 && size == prev.Length {
+		if m.Header.MessageTypeId == prev.MessageTypeId && size > 0 && size == prev.MessageLength {
 			ft++
 			if m.Header.Timestamp == prev.Timestamp {
 				ft++
@@ -538,14 +652,14 @@ func (m *Message) prepare(prev *Header) error {
 
 	if prev != nil {
 		*prev = *m.Header
-		prev.Length = size
+		prev.MessageLength = size
 	}
 
 	hs := chunkHeaderSize[ft]
 
 	log.Printf("RTMP prep %s (%d) fmt=%d csid=%d timestamp=%d mlen=%d msid=%d",
-		m.Header.Type, m.Header.Type, ft,
-		m.Header.ChunkStreamId, timestamp, size, m.Header.StreamId)
+		m.Header.MessageTypeId, m.Header.MessageTypeId, ft,
+		m.Header.ChunkStreamId, timestamp, size, m.Header.MessageStreamId)
 
 	ext := uint32(0)
 	if timestamp >= 0x00ffffff {
@@ -591,13 +705,13 @@ func (m *Message) prepare(prev *Header) error {
 			fch.buf[head] = byte(size >> 16)
 			fch.buf[head+1] = byte(size >> 8)
 			fch.buf[head+2] = byte(size)
-			fch.buf[head+3] = byte(m.Header.Type)
+			fch.buf[head+3] = byte(m.Header.MessageTypeId)
 			head += 4
 			if ft == 0 {
-				fch.buf[head] = byte(m.Header.StreamId >> 24)
-				fch.buf[head+1] = byte(m.Header.StreamId >> 16)
-				fch.buf[head+2] = byte(m.Header.StreamId >> 8)
-				fch.buf[head+3] = byte(m.Header.StreamId)
+				fch.buf[head] = byte(m.Header.MessageStreamId >> 24)
+				fch.buf[head+1] = byte(m.Header.MessageStreamId >> 16)
+				fch.buf[head+2] = byte(m.Header.MessageStreamId >> 8)
+				fch.buf[head+3] = byte(m.Header.MessageStreamId)
 				head += 4
 			}
 		}
@@ -612,7 +726,7 @@ func (m *Message) prepare(prev *Header) error {
 	}
 
 	// set following chunk's fmt to be 3
-	for i := m.Chunks.offw + 1; i < m.Chunks.has; i++ {
+	for i := m.Chunks.offw + 1; i < m.Chunks.len(); i++ {
 		ch := m.Chunks.chunks[i]
 		ch.reset(ftsize)
 		ch.buf[ch.head] = fch.buf[fch.head] | 0xc0

@@ -26,11 +26,11 @@ const (
 	// MaxExtendHeaderSize : Extended Timestamp (0 or 4 bytes)
 	MaxExtendHeaderSize = 4
 
-	// MaxHeaderSize : Chunk header:
+	// MaxHeaderBufferSize : Chunk header:
 	//   max 3  basic header
 	// + max 11 message header
 	// + max 4  extended header (timestamp)
-	MaxHeaderSize = MaxBasicHeaderSize + MaxMessageHeaderSize + MaxExtendHeaderSize
+	MaxHeaderBufferSize = MaxBasicHeaderSize + MaxMessageHeaderSize + MaxExtendHeaderSize
 
 	DefaultReadChunkSize = 128
 	DefaultChunkSize     = 4096
@@ -66,7 +66,7 @@ type ChunkStream struct {
 
 // Stream : RTMP stream declare.
 type Stream struct {
-	hdr Header
-	msg *Message
-	len uint32
+	hdr  *Header
+	msg  *Message
+	read uint32
 }

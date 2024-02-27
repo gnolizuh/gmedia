@@ -26,7 +26,6 @@ import (
 	"log"
 	"math"
 	"net"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -96,7 +95,8 @@ func (srv *Server) Serve(l net.Listener) error {
 
 		c := srv.newConn(rw)
 
-		// init connection state with StateServerRecvChallenge which means peer is server side.
+		// init connection state with StateServerRecvChallenge which
+		// means peer is server side.
 		c.setState(c.rwc, StateServerNew)
 		go c.serve()
 	}
@@ -630,8 +630,8 @@ type conn struct {
 	digest []byte
 
 	// Read and write buffer.
-	bufReader *bufio.Reader
-	bufWriter *bufio.Writer
+	bufr *bufio.Reader
+	bufw *bufio.Writer
 
 	// stream message
 	streams []Stream
@@ -641,7 +641,6 @@ type conn struct {
 
 	// chunk message
 	chunkSize uint32
-	chunkPool *sync.Pool
 
 	// ack window size
 	ackWinSize uint32
@@ -662,15 +661,10 @@ func (srv *Server) newConn(rwc net.Conn) *conn {
 
 	c.epoch = uint32(time.Now().UnixNano() / 1000)
 
-	c.bufReader = bufio.NewReader(rwc)
-	c.bufWriter = bufio.NewWriter(rwc)
+	c.bufr = bufio.NewReader(rwc)
+	c.bufw = bufio.NewWriter(rwc)
 
 	c.streams = make([]Stream, MaxStreamsNum)
-	c.chunkPool = &sync.Pool{
-		New: func() any {
-			return newChunk(c.chunkSize)
-		},
-	}
 
 	c.peer = Peer{
 		RemoteAddr: c.rwc.RemoteAddr().String(),
@@ -717,11 +711,6 @@ func (c *conn) serve() {
 func (c *conn) SetChunkSize(chunkSize uint32) {
 	if c.chunkSize != chunkSize {
 		c.chunkSize = chunkSize
-		c.chunkPool = &sync.Pool{
-			New: func() any {
-				return newChunk(c.chunkSize)
-			},
-		}
 	}
 }
 
@@ -729,9 +718,13 @@ func (c *conn) getReadChunkSize() uint32 {
 	return c.chunkSize
 }
 
-func (c *conn) readFull(buf []byte) error {
-	n, err := io.ReadFull(c.bufReader, buf)
-	if err != nil {
+func (c *conn) readFull(buf []byte) (err error) {
+	var n int
+	n, err = io.ReadFull(c.bufr, buf)
+	if err != nil || n != len(buf) {
+		if err == nil {
+			err = errors.New("insufficient bytes were read")
+		}
 		return err
 	}
 
@@ -835,9 +828,9 @@ func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 			if err != nil {
 				return 0, err
 			}
-			hdr.StreamId = uint32(b[off+2]) | uint32(b[off+1])<<8 | uint32(b[off])<<16
+			hdr.MessageStreamId = uint32(b[off+2]) | uint32(b[off+1])<<8 | uint32(b[off])<<16
 			off += 3
-			hdr.Type = MessageType(b[off])
+			hdr.MessageTypeId = MessageType(b[off])
 			off += 1
 
 			if hdr.Format == 0 {
@@ -845,7 +838,7 @@ func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 				if err != nil {
 					return 0, err
 				}
-				hdr.StreamId = binary.BigEndian.Uint32(b[off : off+4])
+				hdr.MessageStreamId = binary.BigEndian.Uint32(b[off : off+4])
 				off += 4
 			}
 		}
@@ -863,81 +856,87 @@ func (c *conn) readChunkMessageHeader(b []byte, hdr *Header) (uint32, error) {
 	return off, nil
 }
 
-func (c *conn) readMessage() (*Message, error) {
+func (c *conn) readChunk() (*Chunk, *Header, error) {
 	hdr := Header{}
-
-	// alloc shared buffer.
-	b := headerPool.Get().(*[]byte)
-	p := *b
-
-	// recycle shared buffer.
-	defer headerPool.Put(b)
-
-	// read basic header.
-	n, err := c.readBasicHeader(p, &hdr)
+	err := readHeader(c, &hdr)
 	if err != nil {
-		return nil, err
-	}
-	p = p[n:]
-
-	if hdr.ChunkStreamId > MaxStreamsNum {
-		return nil, errors.New(fmt.Sprintf("RTMP in chunk stream too big: %d >= %d", hdr.ChunkStreamId, MaxStreamsNum))
-	}
-
-	// read chunk message header.
-	_, err = c.readChunkMessageHeader(p, &hdr)
-	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// indicate timestamp whether is absolute or relate.
 	stm := c.streams[hdr.ChunkStreamId]
-	if hdr.Format > 0 {
-		stm.hdr.Timestamp += hdr.Timestamp
-	} else {
-		stm.hdr.Timestamp = hdr.Timestamp
-	}
 
-	// copy temp header to chunk stream header.
 	stm.hdr.Format = hdr.Format
 	stm.hdr.ChunkStreamId = hdr.ChunkStreamId
-	if hdr.Format <= 1 {
-		stm.hdr.Length = hdr.Length
-		stm.hdr.Type = hdr.Type
-		if hdr.Format == 0 {
-			stm.hdr.StreamId = hdr.StreamId
+	switch hdr.Format {
+	case 0:
+		stm.hdr.Timestamp = hdr.Timestamp
+		stm.hdr.MessageLength = hdr.MessageLength
+		stm.hdr.MessageTypeId = hdr.MessageTypeId
+		stm.hdr.MessageStreamId = hdr.MessageStreamId
+	case 1:
+		stm.hdr.Timestamp += hdr.Timestamp
+		stm.hdr.MessageLength = hdr.MessageLength
+		stm.hdr.MessageTypeId = hdr.MessageTypeId
+	case 2:
+		stm.hdr.Timestamp += hdr.Timestamp
+	case 3:
+		// see https://rtmp.veriskope.com/docs/spec/#53124-type-3
+		if stm.hdr != nil && stm.hdr.Format == 0 {
+			stm.hdr.Timestamp += stm.hdr.Timestamp
+		}
+
+		// read extend timestamp
+		if stm.hdr.Timestamp == 0x00ffffff {
+			buf := make([]byte, 4)
+			err := c.readFull(buf)
+			if err != nil {
+				return nil, nil, err
+			}
+			stm.hdr.Timestamp = binary.BigEndian.Uint32(buf)
+		}
+	default:
+		panic("unknown format type")
+	}
+
+	// calculate bytes needed.
+	need := uint32(math.Min(float64(stm.hdr.MessageLength-stm.read), float64(c.chunkSize)))
+	if need == 0 {
+		return nil, nil, nil
+	}
+
+	chunk := newChunk(c.chunkSize)
+	if err = c.readFull(chunk.Bytes(need)); err != nil {
+		return nil, nil, err
+	}
+	stm.read += need
+
+	return chunk, stm.hdr, nil
+}
+
+func (c *conn) readMessage() (*Message, error) {
+	msg := newMessage()
+
+	for {
+		chunk, header, err := c.readChunk()
+		if err != nil {
+			return nil, err
+		}
+
+		if chunk != nil {
+			msg.append(chunk)
+		} else {
+			// read completed message.
+			msg.Header = header
+			break
 		}
 	}
 
-	n = uint32(math.Min(float64(stm.hdr.Length-stm.len), float64(c.getReadChunkSize())))
-	ck := c.chunkPool.Get().(*Chunk)
-	// TODO: ck need to free
-
-	// read message body.
-	err = c.readFull(ck.Bytes(n))
-	if err != nil {
-		return nil, err
-	}
-
-	if stm.msg == nil {
-		stm.msg = newMessage(&stm.hdr)
-	}
-
-	stm.msg.appendChunk(ck)
-	stm.len += n
-
-	if stm.hdr.Length == stm.len {
-		if hdr.Type >= MessageTypeMax {
-			return nil, errors.New(fmt.Sprintf("unexpected RTMP message type: %d", hdr.Type))
-		}
-		return stm.msg, nil
-	} else {
-		return nil, errors.New(fmt.Sprintf("unexpected RTMP message len: %d", stm.len))
-	}
+	return msg, nil
 }
 
 func (c *conn) SendAck(seq uint32) error {
-	msg := newMessage(newHeader(MessageTypeAck, 2))
+	msg := newMessage()
 	msg.alloc(4)
 
 	_ = binary.Write(msg, binary.BigEndian, seq)
@@ -947,7 +946,7 @@ func (c *conn) SendAck(seq uint32) error {
 }
 
 func (c *conn) SendAckWinSize(win uint32) error {
-	msg := newMessage(newHeader(MessageTypeWindowAckSize, 2))
+	msg := newMessage()
 	msg.alloc(4)
 
 	_ = binary.Write(msg, binary.BigEndian, win)
@@ -957,7 +956,7 @@ func (c *conn) SendAckWinSize(win uint32) error {
 }
 
 func (c *conn) SendSetPeerBandwidth(win uint32, limit uint8) error {
-	msg := newMessage(newHeader(MessageTypeSetPeerBandwidth, 2))
+	msg := newMessage()
 	msg.alloc(5)
 
 	_ = binary.Write(msg, binary.BigEndian, win)
@@ -968,7 +967,7 @@ func (c *conn) SendSetPeerBandwidth(win uint32, limit uint8) error {
 }
 
 func (c *conn) SendSetChunkSize(cs uint32) error {
-	msg := newMessage(newHeader(MessageTypeSetChunkSize, 2))
+	msg := newMessage()
 
 	msg.alloc(4)
 	_ = binary.Write(msg, binary.BigEndian, cs)
@@ -978,7 +977,7 @@ func (c *conn) SendSetChunkSize(cs uint32) error {
 }
 
 func (c *conn) SendOnBWDone() error {
-	msg := newMessage(newHeader(MessageTypeAMF0Cmd, 3))
+	msg := newMessage()
 	b, _ := amf.Marshal([]any{"onBWDone", 0, nil})
 	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
@@ -988,7 +987,7 @@ func (c *conn) SendOnBWDone() error {
 }
 
 func (c *conn) SendConnectResult(trans uint32, encoding uint32) error {
-	msg := newMessage(newHeader(MessageTypeAMF0Cmd, 3))
+	msg := newMessage()
 
 	type Object struct {
 		FMSVer       string `amf:"fmsVer"`
@@ -1021,7 +1020,7 @@ func (c *conn) SendConnectResult(trans uint32, encoding uint32) error {
 }
 
 func (c *conn) SendReleaseStreamResult(trans uint32) error {
-	msg := newMessage(newHeader(MessageTypeAMF0Cmd, 3))
+	msg := newMessage()
 	var nullArray []uint32
 	b, _ := amf.Marshal([]any{"_result", trans, nil, nullArray})
 	msg.alloc(uint32(len(b)))
@@ -1032,7 +1031,7 @@ func (c *conn) SendReleaseStreamResult(trans uint32) error {
 }
 
 func (c *conn) SendOnFCPublish(trans uint32) error {
-	msg := newMessage(newHeader(MessageTypeAMF0Cmd, 3))
+	msg := newMessage()
 	b, _ := amf.Marshal([]any{"onFCPublish", trans, nil})
 	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
@@ -1042,7 +1041,7 @@ func (c *conn) SendOnFCPublish(trans uint32) error {
 }
 
 func (c *conn) SendFCPublishResult(trans uint32) error {
-	msg := newMessage(newHeader(MessageTypeAMF0Cmd, 3))
+	msg := newMessage()
 	var nullArray []uint32
 	b, _ := amf.Marshal([]any{"_result", trans, nil, nullArray})
 	msg.alloc(uint32(len(b)))
@@ -1053,7 +1052,7 @@ func (c *conn) SendFCPublishResult(trans uint32) error {
 }
 
 func (c *conn) SendCreateStreamResult(trans uint32, stream uint32) error {
-	msg := newMessage(newHeader(MessageTypeAMF0Cmd, 3))
+	msg := newMessage()
 	b, _ := amf.Marshal([]any{"_result", trans, nil, stream})
 	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)

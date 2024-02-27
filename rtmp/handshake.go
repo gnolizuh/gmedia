@@ -220,16 +220,16 @@ func (c *conn) sendChallenge(version, key []byte) error {
 		return err
 	}
 
-	_, err = c.bufWriter.Write(s01)
+	_, err = c.bufw.Write(s01)
 	if err != nil {
 		return err
 	}
 
-	return c.bufWriter.Flush()
+	return c.bufw.Flush()
 }
 
 // recvChallenge recv C0 + C1
-func (c *conn) recvChallenge(ck, sk []byte) error {
+func (c *conn) recvChallenge(chunk, sk []byte) error {
 	c01 := make([]byte, HandshakeChallengeSize)
 	if err := c.readFull(c01); err != nil {
 		return err
@@ -249,9 +249,9 @@ func (c *conn) recvChallenge(ck, sk []byte) error {
 		return nil
 	}
 
-	find, offs := findDigest(c01[1:], ck, 772)
+	find, offs := findDigest(c01[1:], chunk, 772)
 	if !find {
-		find, offs = findDigest(c01[1:], ck, 8)
+		find, offs = findDigest(c01[1:], chunk, 8)
 	}
 
 	if !find {
@@ -284,12 +284,12 @@ func (c *conn) sendResponse() error {
 		s2[offs+uint32(n)] = h
 	}
 
-	_, err = c.bufWriter.Write(s2)
+	_, err = c.bufw.Write(s2)
 	if err != nil {
 		return err
 	}
 
-	return c.bufWriter.Flush()
+	return c.bufw.Flush()
 }
 
 // recvResponse recv C2
