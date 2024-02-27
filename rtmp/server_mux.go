@@ -21,6 +21,7 @@ import (
 	"fmt"
 	amf "github.com/gnolizuh/gamf"
 	"log"
+	"math"
 )
 
 // DefaultServeMux is the default [ServeMux] used by [Serve].
@@ -40,11 +41,11 @@ func init() {
 		case MessageTypeAbort:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAbort)
 		case MessageTypeAck:
-			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAck)
+			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAcknowledgement)
 		case MessageTypeUserControl:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveUserControl)
 		case MessageTypeWindowAckSize:
-			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveWindowAckSize)
+			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveWindowAcknowledgementSize)
 		case MessageTypeSetPeerBandwidth:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveSetPeerBandwidth)
 		case MessageTypeAudio:
@@ -97,7 +98,9 @@ func (mux *ServeMux) serveSetChunkSize(msg *Message) error {
 		return errors.New("too big RTMP chunk size")
 	}
 
-	msg.conn.SetChunkSize(cs)
+	msg.conn.setChunkSize(cs)
+
+	log.Printf("set chunk size, chunk_size: %d", cs)
 
 	return nil
 }
@@ -108,18 +111,22 @@ func (mux *ServeMux) serveAbort(msg *Message) error {
 		return err
 	}
 
+	stm := msg.conn.chunkStreams[csid]
+	stm.abort()
+
 	log.Printf("abort, csid: %d", csid)
 
 	return nil
 }
 
-func (mux *ServeMux) serveAck(msg *Message) error {
+func (mux *ServeMux) serveAcknowledgement(msg *Message) error {
 	seq, err := msg.ReadUInt32()
 	if err != nil {
 		return err
 	}
 
-	log.Printf("ack, seq: %d", seq)
+	msg.conn.outLastAck = seq
+	log.Printf("acknowledgement, receive ack seq: %d", seq)
 
 	return nil
 }
@@ -138,18 +145,25 @@ func (mux *ServeMux) serveUserControl(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveWindowAckSize(msg *Message) error {
-	win, err := msg.ReadUInt32()
+func (mux *ServeMux) serveWindowAcknowledgementSize(msg *Message) error {
+	size, err := msg.ReadUInt32()
 	if err != nil {
 		return err
 	}
 
-	msg.conn.ackWinSize = win
+	msg.conn.winAckSize = size
+	log.Printf("window_acknowledgement_size, receive size: %d", size)
 
 	return nil
 }
 
 func (mux *ServeMux) serveSetPeerBandwidth(msg *Message) error {
+	const (
+		LimitTypeHard = iota
+		LimitTypeSoft
+		LimitTypeDynamic
+	)
+
 	bandwidth, err := msg.ReadUInt32()
 	if err != nil {
 		return err
@@ -160,6 +174,18 @@ func (mux *ServeMux) serveSetPeerBandwidth(msg *Message) error {
 		return err
 	}
 
+	switch limit {
+	case LimitTypeHard:
+		msg.conn.bandwidth = bandwidth
+	case LimitTypeSoft:
+		msg.conn.bandwidth = uint32(math.Min(float64(bandwidth), float64(msg.conn.bandwidth)))
+	case LimitTypeDynamic:
+		if msg.conn.lastLimitType == LimitTypeHard {
+			msg.conn.bandwidth = bandwidth
+		}
+	}
+
+	msg.conn.lastLimitType = limit
 	log.Printf("set peer bandwidth, bandwidth: %d, limit: %d", bandwidth, limit)
 
 	return nil

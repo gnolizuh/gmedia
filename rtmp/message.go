@@ -526,7 +526,7 @@ var messagePool sync.Pool
 // Timestamp: Four-byte field that contains a timestamp of
 // the message. The 4 bytes are packed in the big-endian order.
 //
-// Message Stream Id: Three-byte field that identifies the
+// Message ChunkStream Id: Three-byte field that identifies the
 // stream of the message. These bytes are set in big-endian format.
 //
 // 0                   1                   2                   3
@@ -538,7 +538,7 @@ var messagePool sync.Pool
 // |                           Timestamp                           |
 // |                           (4 bytes)                           |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |                 Stream ID                     |
+// |                 ChunkStream ID                     |
 // |                 (3 bytes)                     |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 type Message struct {

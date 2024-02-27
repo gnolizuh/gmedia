@@ -513,19 +513,21 @@ type conn struct {
 	bufr *bufio.Reader
 	bufw *bufio.Writer
 
-	// stream message
-	streams []Stream
-
-	// chunk stream
-	cs [MaxChunkStream]ChunkStream
+	// chunkStreams hold chunk stream tunnel.
+	chunkStreams []ChunkStream
 
 	// chunk message
 	chunkSize uint32
 
 	// ack window size
-	ackWinSize uint32
+	winAckSize uint32
+
 	inBytes    uint32
 	inLastAck  uint32
+	outLastAck uint32
+
+	lastLimitType uint8
+	bandwidth     uint32
 
 	// peer wrapper
 	peer Peer
@@ -544,7 +546,7 @@ func (srv *Server) newConn(rwc net.Conn) *conn {
 	c.bufr = bufio.NewReader(rwc)
 	c.bufw = bufio.NewWriter(rwc)
 
-	c.streams = make([]Stream, MaxStreamsNum)
+	c.chunkStreams = make([]ChunkStream, MaxStreamsNum)
 
 	c.peer = Peer{
 		RemoteAddr: c.rwc.RemoteAddr().String(),
@@ -591,15 +593,10 @@ func (c *conn) serve() {
 	}
 }
 
-func (c *conn) SetChunkSize(chunkSize uint32) {
+func (c *conn) setChunkSize(chunkSize uint32) {
 	if c.chunkSize != chunkSize {
 		c.chunkSize = chunkSize
 	}
-	// TODO: copy old chunks to new chunks.
-}
-
-func (c *conn) getReadChunkSize() uint32 {
-	return c.chunkSize
 }
 
 func (c *conn) readFull(buf []byte) (err error) {
@@ -619,7 +616,7 @@ func (c *conn) readFull(buf []byte) (err error) {
 		c.inLastAck = 0
 	}
 
-	if c.ackWinSize > 0 && c.inBytes-c.inLastAck >= c.ackWinSize {
+	if c.winAckSize > 0 && c.inBytes-c.inLastAck >= c.winAckSize {
 		c.inLastAck = c.inBytes
 		if err = c.SendAck(c.inBytes); err != nil {
 			return err
@@ -637,7 +634,7 @@ func (c *conn) readChunk() (*Chunk, *Header, error) {
 	}
 
 	// indicate timestamp whether is absolute or relate.
-	stm := c.streams[hdr.ChunkStreamId]
+	stm := c.chunkStreams[hdr.ChunkStreamId]
 
 	stm.hdr.Format = hdr.Format
 	stm.hdr.ChunkStreamId = hdr.ChunkStreamId

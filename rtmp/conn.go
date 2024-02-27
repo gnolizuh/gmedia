@@ -57,16 +57,15 @@ const (
 	MaxChunkStream
 )
 
+// ChunkStream : RTMP stream declare.
 type ChunkStream struct {
-	active    bool
-	timestamp uint32
-	csid      uint32
-	dropped   uint32
-}
-
-// Stream : RTMP stream declare.
-type Stream struct {
 	hdr  *Header
 	msg  *Message
 	read uint32
+}
+
+func (cs *ChunkStream) abort() {
+	cs.hdr = nil
+	cs.msg = nil
+	cs.read = 0
 }
