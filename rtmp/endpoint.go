@@ -16,6 +16,12 @@
 
 package rtmp
 
+type Publisher struct {
+}
+
+type Subscriber struct {
+}
+
 type Peer struct {
 	// RemoteAddr allows RTMP servers and other software to record
 	// the network address present by remote peer, usually for

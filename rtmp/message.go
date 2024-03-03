@@ -123,15 +123,14 @@ func (mt MessageType) String() string {
 type UserMessageType uint
 
 const (
-	UserMessageStreamBegin UserMessageType = iota // 0
-	UserMessageStreamEOF
-	UserMessageStreamDry
-	UserMessageStreamSetBufLen
-	UserMessageStreamIsRecorded
-	UserMessageUnknown
-	UserMessagePingRequest
-	UserMessagePingResponse
-	UserMessageMax
+	UserMessageTypeStreamBegin UserMessageType = iota // 0
+	UserMessageTypeStreamEOF
+	UserMessageTypeStreamDry
+	UserMessageTypeStreamSetBufLen
+	UserMessageTypeStreamIsRecorded
+	UserMessageTypePingRequest = iota + 1
+	UserMessageTypePingResponse
+	UserMessageTypeMax
 )
 
 // Chunk RTMP message chunk declare.
@@ -387,7 +386,7 @@ type Header struct {
 
 var headerPool sync.Pool
 
-func NewHeader() *Header {
+func newHeader() *Header {
 	if v := headerPool.Get(); v != nil {
 		hdr := v.(*Header)
 		return hdr

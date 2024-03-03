@@ -71,13 +71,8 @@ var (
 	ClientFullKey    = ClientKey
 	ClientPartialKey = ClientKey[:30]
 
-	ServerVersion = []byte{
-		0x0D, 0x0E, 0x0A, 0x0D,
-	}
-
-	ClientVersion = []byte{
-		0x0C, 0x00, 0x0D, 0x0E,
-	}
+	ServerVersion = []byte{0x0D, 0x0E, 0x0A, 0x0D}
+	ClientVersion = []byte{0x0C, 0x00, 0x0D, 0x0E}
 
 	ProtoVersion = byte('\x03')
 
@@ -91,8 +86,8 @@ type ConnState uint
 const (
 	StateServerRecvChallenge ConnState = iota
 	StateServerSendChallenge
-	StateServerRecvResponse
 	StateServerSendResponse
+	StateServerRecvResponse
 	StateServerDone
 
 	StateClientSendChallenge
@@ -105,21 +100,24 @@ const (
 	StateClientNew = StateClientSendChallenge
 )
 
-func makeDigest(b, key []byte, offs uint32) ([]byte, error) {
+func makeDigest(b, key []byte, offs uint32, complete bool) ([]byte, error) {
 	h := hmac.New(sha256.New, key)
-	if offs > 0 {
-		if _, err := h.Write(b[:offs]); err != nil {
-			return nil, err
+	if !complete {
+		if offs > 0 {
+			if _, err := h.Write(b[:offs]); err != nil {
+				return nil, err
+			}
 		}
-		if _, err := h.Write(b[offs+HandshakeKeyLen:]); err != nil {
-			return nil, err
+		if offs+HandshakeKeyLen < uint32(len(b)) {
+			if _, err := h.Write(b[offs+HandshakeKeyLen:]); err != nil {
+				return nil, err
+			}
 		}
 	} else {
 		if _, err := h.Write(b); err != nil {
 			return nil, err
 		}
 	}
-
 	return h.Sum(nil), nil
 }
 
@@ -129,23 +127,20 @@ func findDigest(b, key []byte, base uint32) (bool, uint32) {
 		offs += uint32(b[base+n])
 	}
 	offs = (offs % 728) + base + 4
-
-	hs, err := makeDigest(b, key, offs)
+	hs, err := makeDigest(b, key, offs, false)
 	if err != nil {
 		return false, 0
 	}
-
 	return bytes.Equal(b[offs:offs+uint32(len(hs))], hs), offs
 }
 
 func writeDigest(b, key []byte, base uint32) error {
 	offs := uint32(0)
-	for n := uint32(8); n < 12; n++ {
+	for n := uint32(0); n < 4; n++ {
 		offs += uint32(b[base+n])
 	}
-	offs = (offs % 728) + base + 12
-
-	hs, err := makeDigest(b, key, offs)
+	offs = (offs % 728) + base + 4
+	hs, err := makeDigest(b, key, offs, false)
 	if err != nil {
 		return err
 	}
@@ -165,20 +160,19 @@ func makeRandom(p []byte) {
 
 func (c *conn) handshake() error {
 	var err error
-	run := true
-	for run {
+	for {
 		state := ConnState(c.state.Load())
 		switch state {
 		case StateServerRecvChallenge:
 			err = c.recvChallenge(ClientPartialKey, ServerFullKey)
 		case StateServerSendChallenge:
 			err = c.sendChallenge(ServerVersion, ServerPartialKey)
-		case StateServerRecvResponse:
-			err = c.recvResponse()
 		case StateServerSendResponse:
 			err = c.sendResponse()
+		case StateServerRecvResponse:
+			err = c.recvResponse()
 		case StateServerDone:
-			run = false
+			return nil
 		case StateClientSendChallenge:
 			err = c.sendChallenge(ClientVersion, ClientPartialKey)
 		case StateClientRecvChallenge:
@@ -188,7 +182,7 @@ func (c *conn) handshake() error {
 		case StateClientRecvResponse:
 			err = c.recvResponse()
 		case StataClientDone:
-			run = false
+			return nil
 		default:
 			panic("unhandled default case")
 		}
@@ -204,7 +198,7 @@ func (c *conn) handshake() error {
 }
 
 // sendChallenge send S0 + S1
-func (c *conn) sendChallenge(version, key []byte) error {
+func (c *conn) sendChallenge(version, pk []byte) error {
 	s01 := make([]byte, HandshakeChallengeSize)
 
 	// s0, version MUST be 0x03
@@ -215,7 +209,7 @@ func (c *conn) sendChallenge(version, key []byte) error {
 	copy(s01[5:9], version)                       // version(zero)
 
 	makeRandom(s01[9:]) // random
-	err := writeDigest(s01[1:], key, 0)
+	err := writeDigest(s01[1:], pk, 8)
 	if err != nil {
 		return err
 	}
@@ -229,7 +223,7 @@ func (c *conn) sendChallenge(version, key []byte) error {
 }
 
 // recvChallenge recv C0 + C1
-func (c *conn) recvChallenge(chunk, sk []byte) error {
+func (c *conn) recvChallenge(pk, k []byte) error {
 	c01 := make([]byte, HandshakeChallengeSize)
 	if err := c.readFull(c01); err != nil {
 		return err
@@ -249,17 +243,16 @@ func (c *conn) recvChallenge(chunk, sk []byte) error {
 		return nil
 	}
 
-	find, offs := findDigest(c01[1:], chunk, 772)
+	find, offs := findDigest(c01[1:], pk, 772)
 	if !find {
-		find, offs = findDigest(c01[1:], chunk, 8)
+		find, offs = findDigest(c01[1:], pk, 8)
 	}
-
 	if !find {
 		return errors.New("handshake: digest not found")
 	}
 
 	var err error
-	c.digest, err = makeDigest(c01[1+offs:], sk, offs)
+	c.digest, err = makeDigest(c01[1+offs:1+offs+HandshakeKeyLen], k, offs, true)
 	if err != nil {
 		return err
 	}
@@ -275,7 +268,7 @@ func (c *conn) sendResponse() error {
 	makeRandom(s2)
 
 	offs := HandshakeResponseSize - HandshakeKeyLen
-	hs, err := makeDigest(s2, c.digest, offs)
+	hs, err := makeDigest(s2, c.digest, offs, false)
 	if err != nil {
 		return err
 	}

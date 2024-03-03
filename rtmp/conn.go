@@ -16,6 +16,17 @@
 
 package rtmp
 
+import (
+	"bufio"
+	"encoding/binary"
+	"errors"
+	amf "github.com/gnolizuh/gamf"
+	"io"
+	"math"
+	"net"
+	"sync/atomic"
+)
+
 const (
 	// MaxBasicHeaderSize : Basic Header (1 to 3 bytes)
 	MaxBasicHeaderSize = 3
@@ -64,8 +75,327 @@ type ChunkStream struct {
 	read uint32
 }
 
+func (cs *ChunkStream) completed() bool {
+	return cs.hdr != nil && cs.hdr.MessageLength == cs.read
+}
+
 func (cs *ChunkStream) abort() {
 	cs.hdr = nil
 	cs.msg = nil
 	cs.read = 0
+}
+
+// The conn type represents a RTMP connection.
+type conn struct {
+	// server is the server on which the connection arrived.
+	// Immutable; never nil.
+	server *Server
+
+	// rwc is the underlying network connection.
+	rwc net.Conn
+
+	// remoteAddr is rwc.RemoteAddr().String(). It is not populated synchronously
+	// inside the Listener's Accept goroutine, as some implementations block.
+	remoteAddr string
+
+	// Connection incoming time(microsecond) and incoming time from remote peer.
+	epoch         uint32
+	incomingEpoch uint32
+
+	// State and digest be used in RTMP handshake.
+	state  atomic.Uint32
+	digest []byte
+
+	// Read and write buffer.
+	bufr *bufio.Reader
+	bufw *bufio.Writer
+
+	// chunkStreams hold chunk stream tunnel.
+	chunkStreams []ChunkStream
+
+	// chunk message
+	chunkSize uint32
+
+	// ack window size
+	winAckSize uint32
+
+	inBytes    uint32
+	inLastAck  uint32
+	outLastAck uint32
+
+	lastLimitType uint8
+	bandwidth     uint32
+
+	// peer wrapper
+	peer Peer
+}
+
+func (c *conn) setState(nc net.Conn, state ConnState) {
+	if state > StateServerDone || state < StateServerRecvChallenge {
+		panic("internal error")
+	}
+	c.state.Store(uint32(state))
+	if hook := c.server.ConnState; hook != nil {
+		hook(nc, state)
+	}
+}
+
+// serve a new connection.
+func (c *conn) serve() {
+	if ra := c.rwc.RemoteAddr(); ra != nil {
+		c.remoteAddr = ra.String()
+	}
+
+	err := c.handshake()
+	if err != nil {
+		panic(err)
+		return
+	}
+
+	for {
+		msg, err := c.readMessage()
+		if err != nil {
+			panic(err)
+			return
+		}
+
+		sh := serverHandler{c.server}
+		if err = sh.ServeMessage(msg); err != nil {
+			panic(err)
+			return
+		}
+	}
+}
+
+func (c *conn) setChunkSize(chunkSize uint32) {
+	if c.chunkSize != chunkSize {
+		c.chunkSize = chunkSize
+	}
+}
+
+func (c *conn) readFull(buf []byte) (err error) {
+	var n int
+	n, err = io.ReadFull(c.bufr, buf)
+	if err != nil || n != len(buf) {
+		if err == nil {
+			err = errors.New("insufficient bytes were read")
+		}
+		return err
+	}
+
+	c.inBytes += uint32(n)
+
+	if c.inBytes >= 0xf0000000 {
+		c.inBytes = 0
+		c.inLastAck = 0
+	}
+
+	if c.winAckSize > 0 && c.inBytes-c.inLastAck >= c.winAckSize {
+		c.inLastAck = c.inBytes
+		if err = c.SendAck(c.inBytes); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *conn) readChunk() (*ChunkStream, *Chunk, error) {
+	hdr := Header{}
+	err := readHeader(c, &hdr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// indicate timestamp whether is absolute or relate.
+	stm := &c.chunkStreams[hdr.ChunkStreamId]
+	if stm.hdr == nil {
+		stm.hdr = newHeader()
+	}
+
+	stm.hdr.Format = hdr.Format
+	stm.hdr.ChunkStreamId = hdr.ChunkStreamId
+	switch hdr.Format {
+	case 0:
+		stm.hdr.Timestamp = hdr.Timestamp
+		stm.hdr.MessageLength = hdr.MessageLength
+		stm.hdr.MessageTypeId = hdr.MessageTypeId
+		stm.hdr.MessageStreamId = hdr.MessageStreamId
+	case 1:
+		stm.hdr.Timestamp += hdr.Timestamp
+		stm.hdr.MessageLength = hdr.MessageLength
+		stm.hdr.MessageTypeId = hdr.MessageTypeId
+	case 2:
+		stm.hdr.Timestamp += hdr.Timestamp
+	case 3:
+		// see https://rtmp.veriskope.com/docs/spec/#53124-type-3
+		if stm.hdr != nil && stm.hdr.Format == 0 {
+			stm.hdr.Timestamp += stm.hdr.Timestamp
+		}
+
+		// read extend timestamp
+		if stm.hdr.Timestamp == 0x00ffffff {
+			buf := make([]byte, 4)
+			err := c.readFull(buf)
+			if err != nil {
+				return nil, nil, err
+			}
+			stm.hdr.Timestamp = binary.BigEndian.Uint32(buf)
+		}
+	default:
+		panic("unknown format type")
+	}
+
+	// calculate bytes needed.
+	need := uint32(math.Min(float64(stm.hdr.MessageLength-stm.read), float64(c.chunkSize)))
+	chunk := newChunk(c.chunkSize)
+	if err = c.readFull(chunk.Bytes(need)); err != nil {
+		return nil, nil, err
+	}
+	stm.read += need
+
+	return stm, chunk, nil
+}
+
+func (c *conn) readMessage() (*Message, error) {
+	msg := newMessage()
+	for {
+		stream, chunk, err := c.readChunk()
+		if err != nil {
+			return nil, err
+		}
+		if !stream.completed() {
+			msg.append(chunk)
+		} else {
+			msg.Header = stream.hdr
+			break
+		}
+	}
+	return msg, nil
+}
+
+func (c *conn) SendAck(seq uint32) error {
+	msg := newMessage()
+	msg.alloc(4)
+
+	_ = binary.Write(msg, binary.BigEndian, seq)
+	_ = msg.prepare(nil)
+
+	return msg.Send(c.rwc)
+}
+
+func (c *conn) SendAckWinSize(win uint32) error {
+	msg := newMessage()
+	msg.alloc(4)
+
+	_ = binary.Write(msg, binary.BigEndian, win)
+	_ = msg.prepare(nil)
+
+	return msg.Send(c.rwc)
+}
+
+func (c *conn) SendSetPeerBandwidth(win uint32, limit uint8) error {
+	msg := newMessage()
+	msg.alloc(5)
+
+	_ = binary.Write(msg, binary.BigEndian, win)
+	_ = msg.WriteByte(limit)
+	_ = msg.prepare(nil)
+
+	return msg.Send(c.rwc)
+}
+
+func (c *conn) SendSetChunkSize(cs uint32) error {
+	msg := newMessage()
+
+	msg.alloc(4)
+	_ = binary.Write(msg, binary.BigEndian, cs)
+	_ = msg.prepare(nil)
+
+	return msg.Send(c.rwc)
+}
+
+func (c *conn) SendOnBWDone() error {
+	msg := newMessage()
+	b, _ := amf.Marshal([]any{"onBWDone", 0, nil})
+	msg.alloc(uint32(len(b)))
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
+
+	return msg.Send(c.rwc)
+}
+
+func (c *conn) SendConnectResult(trans uint32, encoding uint32) error {
+	msg := newMessage()
+
+	type Object struct {
+		FMSVer       string `amf:"fmsVer"`
+		Capabilities uint32 `amf:"capabilities"`
+	}
+
+	type Info struct {
+		Level          string `amf:"level"`
+		Code           string `amf:"code"`
+		Description    string `amf:"description"`
+		ObjectEncoding uint32 `amf:"objectEncoding"`
+	}
+
+	obj := Object{
+		FMSVer:       DefaultFMSVersion,
+		Capabilities: DefaultCapabilities,
+	}
+	inf := Info{
+		Level:          "status",
+		Code:           "NetConnection.Connect.Success",
+		Description:    "Connection succeeded.",
+		ObjectEncoding: encoding,
+	}
+	b, _ := amf.Marshal([]any{"_result", trans, obj, inf})
+	msg.alloc(uint32(len(b)))
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
+
+	return msg.Send(c.rwc)
+}
+
+func (c *conn) SendReleaseStreamResult(trans uint32) error {
+	msg := newMessage()
+	var nullArray []uint32
+	b, _ := amf.Marshal([]any{"_result", trans, nil, nullArray})
+	msg.alloc(uint32(len(b)))
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
+
+	return msg.Send(c.rwc)
+}
+
+func (c *conn) SendOnFCPublish(trans uint32) error {
+	msg := newMessage()
+	b, _ := amf.Marshal([]any{"onFCPublish", trans, nil})
+	msg.alloc(uint32(len(b)))
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
+
+	return msg.Send(c.rwc)
+}
+
+func (c *conn) SendFCPublishResult(trans uint32) error {
+	msg := newMessage()
+	var nullArray []uint32
+	b, _ := amf.Marshal([]any{"_result", trans, nil, nullArray})
+	msg.alloc(uint32(len(b)))
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
+
+	return msg.Send(c.rwc)
+}
+
+func (c *conn) SendCreateStreamResult(trans uint32, stream uint32) error {
+	msg := newMessage()
+	b, _ := amf.Marshal([]any{"_result", trans, nil, stream})
+	msg.alloc(uint32(len(b)))
+	_, _ = msg.Write(b)
+	_ = msg.prepare(nil)
+
+	return msg.Send(c.rwc)
 }
