@@ -133,19 +133,31 @@ const (
 	UserMessageTypeMax
 )
 
+type ChunkReader struct {
+	conn  *conn
+	chunk *Chunk
+}
+
+func (cr ChunkReader) ReadN(n uint32) (int, error) {
+	m, err := cr.conn.ReadFull(cr.chunk.bytes(n))
+	if err != nil {
+		return m, err
+	}
+	cr.chunk.offs += uint32(m)
+	return m, nil
+}
+
 // Chunk RTMP message chunk declare.
 type Chunk struct {
+	msg *Message
+
+	// specifies RTMP ChunkSize.
+	size uint32
+
 	buf []byte
 
 	// for reading
-	offr uint32
-
-	// for writing
-	offw uint32
-	head uint32
-
-	// for sending
-	offs uint32
+	offr, offw, offs, head uint32
 }
 
 var chunkPool sync.Pool
@@ -153,9 +165,17 @@ var chunkPool sync.Pool
 func newChunk(chunkSize uint32) *Chunk {
 	if v := chunkPool.Get(); v != nil {
 		chunk := v.(*Chunk)
+		chunk.msg = nil
+		chunk.size = chunkSize
+		chunk.buf = make([]byte, chunkSize+MaxHeaderBufferSize)
+		chunk.offr = MaxHeaderBufferSize
+		chunk.offw = MaxHeaderBufferSize
+		chunk.head = MaxHeaderBufferSize
+		chunk.offs = MaxHeaderBufferSize
 		return chunk
 	}
 	return &Chunk{
+		size: chunkSize,
 		buf:  make([]byte, chunkSize+MaxHeaderBufferSize),
 		offr: MaxHeaderBufferSize,
 		offw: MaxHeaderBufferSize,
@@ -173,6 +193,14 @@ func (chunk *Chunk) reset(n uint32) {
 	chunk.offs = chunk.head
 }
 
+func (chunk *Chunk) bytes(n uint32) []byte {
+	return chunk.buf[chunk.offr : chunk.offr+n]
+}
+
+func (chunk *Chunk) length() uint32 {
+	return chunk.offs - chunk.head
+}
+
 func (chunk *Chunk) Send(w io.Writer) error {
 	for chunk.offs < chunk.offw {
 		n, err := w.Write(chunk.buf[chunk.offs:chunk.offw])
@@ -184,57 +212,45 @@ func (chunk *Chunk) Send(w io.Writer) error {
 	return nil
 }
 
-func (chunk *Chunk) Bytes(n uint32) []byte {
-	// assert n <= len(chunk.buf[chunk.off:])
-	return chunk.buf[chunk.offr : chunk.offr+n]
-}
-
 func (chunk *Chunk) Read(p []byte) (int, error) {
-	n := uint32(len(p))
-	m := uint32(len(chunk.buf[chunk.offr:]))
-
-	if r := uint32(math.Min(float64(n), float64(m))); r > 0 {
+	n := float64(len(p))
+	m := float64(len(chunk.buf[chunk.offr:]))
+	if r := uint32(math.Min(n, m)); r > 0 {
 		copy(p, chunk.buf[chunk.offr:chunk.offr+r])
 		chunk.offr += r
 		return int(r), nil
 	}
-
 	return 0, io.EOF
 }
 
 func (chunk *Chunk) Write(p []byte) (int, error) {
-	n := uint32(len(p))
-	m := uint32(len(chunk.buf[chunk.offw:]))
-
-	if w := uint32(math.Min(float64(n), float64(m))); w > 0 {
+	n := float64(len(p))
+	m := float64(len(chunk.buf[chunk.offw:]))
+	if w := uint32(math.Min(n, m)); w > 0 {
 		copy(chunk.buf[chunk.offw:], p[:w])
 		chunk.offw += w
 		return int(w), nil
 	}
-
 	return 0, io.EOF
 }
 
 func (chunk *Chunk) ReadByte() (byte, error) {
-	if len(chunk.buf[chunk.offr:]) <= 0 {
-		return 0, io.EOF
+	bs := make([]byte, 1)
+	_, err := chunk.Read(bs)
+	if err != nil {
+		return 0, err
 	}
-	b := chunk.buf[chunk.offr]
-	chunk.offr++
-	return b, nil
+	return bs[0], nil
 }
 
-func (chunk *Chunk) WriteByte(c byte) error {
-	if chunk.offw == uint32(len(chunk.buf)) {
-		return io.EOF
+func (chunk *Chunk) WriteByte(b byte) error {
+	bs := make([]byte, 1)
+	bs[0] = b
+	_, err := chunk.Write(bs)
+	if err != nil {
+		return err
 	}
-	chunk.buf[chunk.offw] = c
-	chunk.offw++
 	return nil
-}
-
-func (chunk *Chunk) size() uint32 {
-	return chunk.offw - chunk.head
 }
 
 type Chunks struct {
@@ -242,14 +258,8 @@ type Chunks struct {
 
 	length uint32
 
-	// for reading
-	offr uint32
-
-	// for writing
-	offw uint32
-
-	// for sending
-	offs uint32
+	// for reading, writing and sending
+	offr, offw, offs uint32
 }
 
 func newChunks() *Chunks {
@@ -268,7 +278,7 @@ func (chunks *Chunks) size() uint32 {
 
 func (chunks *Chunks) append(chunk *Chunk) {
 	chunks.chunks = append(chunks.chunks, chunk)
-	chunks.length += chunk.size()
+	chunks.length += chunk.length()
 }
 
 // Read reads data into p. It returns the number of bytes
@@ -400,7 +410,7 @@ func readHeader(c *conn, hdr *Header) error {
 
 	// basic header
 	off := uint32(0)
-	err := c.readFull(buf[off : off+1])
+	_, err := c.ReadFull(buf[off : off+1])
 	if err != nil {
 		return err
 	}
@@ -427,7 +437,7 @@ func readHeader(c *conn, hdr *Header) error {
 		 * |fmt|     0     |  cs id - 64   |
 		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		 */
-		err := c.readFull(buf[off : off+1])
+		_, err := c.ReadFull(buf[off : off+1])
 		if err != nil {
 			return err
 		}
@@ -444,7 +454,7 @@ func readHeader(c *conn, hdr *Header) error {
 		 * |fmt|     1     |           cs id - 64          |
 		 * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		 */
-		err := c.readFull(buf[off : off+2])
+		_, err := c.ReadFull(buf[off : off+2])
 		if err != nil {
 			return err
 		}
@@ -465,7 +475,7 @@ func readHeader(c *conn, hdr *Header) error {
 	// |               timestamp delta                 |
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 	if hdr.Format <= 2 {
-		err := c.readFull(buf[off : off+3])
+		_, err := c.ReadFull(buf[off : off+3])
 		if err != nil {
 			return err
 		}
@@ -479,7 +489,7 @@ func readHeader(c *conn, hdr *Header) error {
 		// |     message length (cont)     |message type id|
 		// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 		if hdr.Format <= 1 {
-			err := c.readFull(buf[off : off+4])
+			_, err := c.ReadFull(buf[off : off+4])
 			if err != nil {
 				return err
 			}
@@ -497,7 +507,7 @@ func readHeader(c *conn, hdr *Header) error {
 			// |           message stream id (cont)            |
 			// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 			if hdr.Format == 0 {
-				err := c.readFull(buf[off : off+4])
+				_, err := c.ReadFull(buf[off : off+4])
 				if err != nil {
 					return err
 				}
@@ -541,14 +551,15 @@ var messagePool sync.Pool
 // |                 (3 bytes)                     |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 type Message struct {
-	conn   *conn
 	Header *Header
 	Chunks *Chunks
+	read   uint32
 }
 
 func newMessage() *Message {
 	if v := messagePool.Get(); v != nil {
 		m := v.(*Message)
+		m.read = 0
 		return m
 	}
 	return &Message{
@@ -558,6 +569,11 @@ func newMessage() *Message {
 
 func (m *Message) append(chunk *Chunk) {
 	m.Chunks.append(chunk)
+	m.read += chunk.length()
+}
+
+func (m *Message) completed() bool {
+	return m.Header != nil && m.Header.MessageLength == m.read
 }
 
 func (m *Message) Send(w io.Writer) error {

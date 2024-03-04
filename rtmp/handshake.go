@@ -100,23 +100,25 @@ const (
 	StateClientNew = StateClientSendChallenge
 )
 
-func makeDigest(b, key []byte, offs uint32, complete bool) ([]byte, error) {
+func makeDigest(b, key []byte, offs uint32) ([]byte, error) {
 	h := hmac.New(sha256.New, key)
-	if !complete {
-		if offs > 0 {
-			if _, err := h.Write(b[:offs]); err != nil {
-				return nil, err
-			}
-		}
-		if offs+HandshakeKeyLen < uint32(len(b)) {
-			if _, err := h.Write(b[offs+HandshakeKeyLen:]); err != nil {
-				return nil, err
-			}
-		}
-	} else {
-		if _, err := h.Write(b); err != nil {
+	if offs > 0 {
+		if _, err := h.Write(b[:offs]); err != nil {
 			return nil, err
 		}
+	}
+	if offs+HandshakeKeyLen < uint32(len(b)) {
+		if _, err := h.Write(b[offs+HandshakeKeyLen:]); err != nil {
+			return nil, err
+		}
+	}
+	return h.Sum(nil), nil
+}
+
+func makeDigestWhole(b, key []byte) ([]byte, error) {
+	h := hmac.New(sha256.New, key)
+	if _, err := h.Write(b); err != nil {
+		return nil, err
 	}
 	return h.Sum(nil), nil
 }
@@ -127,7 +129,7 @@ func findDigest(b, key []byte, base uint32) (bool, uint32) {
 		offs += uint32(b[base+n])
 	}
 	offs = (offs % 728) + base + 4
-	hs, err := makeDigest(b, key, offs, false)
+	hs, err := makeDigest(b, key, offs)
 	if err != nil {
 		return false, 0
 	}
@@ -140,15 +142,11 @@ func writeDigest(b, key []byte, base uint32) error {
 		offs += uint32(b[base+n])
 	}
 	offs = (offs % 728) + base + 4
-	hs, err := makeDigest(b, key, offs, false)
+	hs, err := makeDigest(b, key, offs)
 	if err != nil {
 		return err
 	}
-
-	for n, h := range hs {
-		b[offs+uint32(n)] = h
-	}
-
+	copy(b[offs:], hs)
 	return nil
 }
 
@@ -198,7 +196,7 @@ func (c *conn) handshake() error {
 }
 
 // sendChallenge send S0 + S1
-func (c *conn) sendChallenge(version, pk []byte) error {
+func (c *conn) sendChallenge(version, peerKey []byte) error {
 	s01 := make([]byte, HandshakeChallengeSize)
 
 	// s0, version MUST be 0x03
@@ -209,7 +207,7 @@ func (c *conn) sendChallenge(version, pk []byte) error {
 	copy(s01[5:9], version)                       // version(zero)
 
 	makeRandom(s01[9:]) // random
-	err := writeDigest(s01[1:], pk, 8)
+	err := writeDigest(s01[1:], peerKey, 8)
 	if err != nil {
 		return err
 	}
@@ -223,9 +221,9 @@ func (c *conn) sendChallenge(version, pk []byte) error {
 }
 
 // recvChallenge recv C0 + C1
-func (c *conn) recvChallenge(pk, k []byte) error {
+func (c *conn) recvChallenge(peerKey, key []byte) error {
 	c01 := make([]byte, HandshakeChallengeSize)
-	if err := c.readFull(c01); err != nil {
+	if _, err := c.ReadFull(c01); err != nil {
 		return err
 	}
 
@@ -243,16 +241,16 @@ func (c *conn) recvChallenge(pk, k []byte) error {
 		return nil
 	}
 
-	find, offs := findDigest(c01[1:], pk, 772)
+	find, offs := findDigest(c01[1:], peerKey, 772)
 	if !find {
-		find, offs = findDigest(c01[1:], pk, 8)
+		find, offs = findDigest(c01[1:], peerKey, 8)
 	}
 	if !find {
 		return errors.New("handshake: digest not found")
 	}
 
 	var err error
-	c.digest, err = makeDigest(c01[1+offs:1+offs+HandshakeKeyLen], k, offs, true)
+	c.digest, err = makeDigestWhole(c01[1+offs:1+offs+HandshakeKeyLen], key)
 	if err != nil {
 		return err
 	}
@@ -266,16 +264,12 @@ func (c *conn) sendResponse() error {
 
 	// s2
 	makeRandom(s2)
-
 	offs := HandshakeResponseSize - HandshakeKeyLen
-	hs, err := makeDigest(s2, c.digest, offs, false)
+	hs, err := makeDigest(s2, c.digest, offs)
 	if err != nil {
 		return err
 	}
-
-	for n, h := range hs {
-		s2[offs+uint32(n)] = h
-	}
+	copy(s2[offs:], hs)
 
 	_, err = c.bufw.Write(s2)
 	if err != nil {
@@ -289,7 +283,7 @@ func (c *conn) sendResponse() error {
 func (c *conn) recvResponse() error {
 	// c2
 	c2 := make([]byte, HandshakeResponseSize)
-	if err := c.readFull(c2); err != nil {
+	if _, err := c.ReadFull(c2); err != nil {
 		return err
 	}
 

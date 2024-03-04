@@ -37,7 +37,7 @@ type tcpKeepAliveListener struct {
 //}
 
 type Handler interface {
-	ServeMessage(*Message) error
+	ServeMessage(*ChunkStream, *Message) error
 }
 
 type Server struct {
@@ -122,10 +122,10 @@ var (
 	handlerType = reflect.TypeOf((*Handler)(nil)).Elem()
 )
 
-func (sh *serverHandler) ServeMessage(msg *Message) error {
+func (sh *serverHandler) ServeMessage(cs *ChunkStream, msg *Message) error {
 	th := sh.srv.TypeHandlers[msg.Header.MessageTypeId]
 	if th != nil {
-		return th(msg)
+		return th(cs, msg)
 	}
 
 	e := reflect.ValueOf(sh.srv.Handler).Elem()
@@ -133,11 +133,11 @@ func (sh *serverHandler) ServeMessage(msg *Message) error {
 	for i := 0; i < e.NumField(); i++ {
 		if t.Field(i).Type.Implements(handlerType) {
 			handler := sh.srv.Handler.(Handler)
-			return handler.ServeMessage(msg)
+			return handler.ServeMessage(cs, msg)
 		}
 	}
 
-	return DefaultServeMux.ServeMessage(msg)
+	return DefaultServeMux.ServeMessage(cs, msg)
 }
 
 // --------------------------------------------- conn --------------------------------------------- //
@@ -156,6 +156,9 @@ func (srv *Server) newConn(rwc net.Conn) *conn {
 	c.bufw = bufio.NewWriter(rwc)
 
 	c.chunkStreams = make([]ChunkStream, MaxStreamsNum)
+	for i := range c.chunkStreams {
+		c.chunkStreams[i].conn = c
+	}
 
 	c.peer = Peer{
 		RemoteAddr: c.rwc.RemoteAddr().String(),

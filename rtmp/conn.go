@@ -70,18 +70,13 @@ const (
 
 // ChunkStream : RTMP stream declare.
 type ChunkStream struct {
+	conn *conn
 	hdr  *Header
-	msg  *Message
 	read uint32
-}
-
-func (cs *ChunkStream) completed() bool {
-	return cs.hdr != nil && cs.hdr.MessageLength == cs.read
 }
 
 func (cs *ChunkStream) abort() {
 	cs.hdr = nil
-	cs.msg = nil
 	cs.read = 0
 }
 
@@ -153,14 +148,14 @@ func (c *conn) serve() {
 	}
 
 	for {
-		msg, err := c.readMessage()
+		cs, msg, err := c.readMessage()
 		if err != nil {
 			panic(err)
 			return
 		}
 
 		sh := serverHandler{c.server}
-		if err = sh.ServeMessage(msg); err != nil {
+		if err = sh.ServeMessage(cs, msg); err != nil {
 			panic(err)
 			return
 		}
@@ -173,15 +168,8 @@ func (c *conn) setChunkSize(chunkSize uint32) {
 	}
 }
 
-func (c *conn) readFull(buf []byte) (err error) {
-	var n int
-	n, err = io.ReadFull(c.bufr, buf)
-	if err != nil || n != len(buf) {
-		if err == nil {
-			err = errors.New("insufficient bytes were read")
-		}
-		return err
-	}
+func (c *conn) Read(p []byte) (int, error) {
+	n, err := c.bufr.Read(p)
 
 	c.inBytes += uint32(n)
 
@@ -193,11 +181,22 @@ func (c *conn) readFull(buf []byte) (err error) {
 	if c.winAckSize > 0 && c.inBytes-c.inLastAck >= c.winAckSize {
 		c.inLastAck = c.inBytes
 		if err = c.SendAck(c.inBytes); err != nil {
-			return err
+			return n, err
 		}
 	}
 
-	return nil
+	return n, err
+}
+
+func (c *conn) ReadFull(buf []byte) (n int, err error) {
+	n, err = io.ReadFull(c, buf)
+	if err != nil || n != len(buf) {
+		if err == nil {
+			err = errors.New("insufficient bytes were read")
+		}
+		return n, err
+	}
+	return n, nil
 }
 
 func (c *conn) readChunk() (*ChunkStream, *Chunk, error) {
@@ -236,7 +235,7 @@ func (c *conn) readChunk() (*ChunkStream, *Chunk, error) {
 		// read extend timestamp
 		if stm.hdr.Timestamp == 0x00ffffff {
 			buf := make([]byte, 4)
-			err := c.readFull(buf)
+			_, err := c.ReadFull(buf)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -248,8 +247,10 @@ func (c *conn) readChunk() (*ChunkStream, *Chunk, error) {
 
 	// calculate bytes needed.
 	need := uint32(math.Min(float64(stm.hdr.MessageLength-stm.read), float64(c.chunkSize)))
+
 	chunk := newChunk(c.chunkSize)
-	if err = c.readFull(chunk.Bytes(need)); err != nil {
+	reader := ChunkReader{conn: c, chunk: chunk}
+	if _, err = reader.ReadN(need); err != nil {
 		return nil, nil, err
 	}
 	stm.read += need
@@ -257,21 +258,19 @@ func (c *conn) readChunk() (*ChunkStream, *Chunk, error) {
 	return stm, chunk, nil
 }
 
-func (c *conn) readMessage() (*Message, error) {
+func (c *conn) readMessage() (*ChunkStream, *Message, error) {
 	msg := newMessage()
 	for {
-		stream, chunk, err := c.readChunk()
+		cs, ck, err := c.readChunk()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if !stream.completed() {
-			msg.append(chunk)
-		} else {
-			msg.Header = stream.hdr
-			break
+		msg.Header = cs.hdr
+		msg.append(ck)
+		if msg.completed() {
+			return cs, msg, nil
 		}
 	}
-	return msg, nil
 }
 
 func (c *conn) SendAck(seq uint32) error {
