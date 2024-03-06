@@ -22,7 +22,6 @@ import (
 	"errors"
 	amf "github.com/gnolizuh/gamf"
 	"io"
-	"math"
 	"net"
 	"sync/atomic"
 )
@@ -72,12 +71,10 @@ const (
 type ChunkStream struct {
 	conn *conn
 	hdr  *Header
-	read uint32
 }
 
 func (cs *ChunkStream) abort() {
 	cs.hdr = nil
-	cs.read = 0
 }
 
 // The conn type represents a RTMP connection.
@@ -148,14 +145,14 @@ func (c *conn) serve() {
 	}
 
 	for {
-		cs, msg, err := c.readMessage()
+		msg, err := c.readMessage()
 		if err != nil {
 			panic(err)
 			return
 		}
 
 		sh := serverHandler{c.server}
-		if err = sh.ServeMessage(cs, msg); err != nil {
+		if err = sh.ServeMessage(msg); err != nil {
 			panic(err)
 			return
 		}
@@ -199,76 +196,17 @@ func (c *conn) ReadFull(buf []byte) (n int, err error) {
 	return n, nil
 }
 
-func (c *conn) readChunk() (*ChunkStream, *Chunk, error) {
-	hdr := Header{}
-	err := readHeader(c, &hdr)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// indicate timestamp whether is absolute or relate.
-	stm := &c.chunkStreams[hdr.ChunkStreamId]
-	if stm.hdr == nil {
-		stm.hdr = newHeader()
-	}
-
-	stm.hdr.Format = hdr.Format
-	stm.hdr.ChunkStreamId = hdr.ChunkStreamId
-	switch hdr.Format {
-	case 0:
-		stm.hdr.Timestamp = hdr.Timestamp
-		stm.hdr.MessageLength = hdr.MessageLength
-		stm.hdr.MessageTypeId = hdr.MessageTypeId
-		stm.hdr.MessageStreamId = hdr.MessageStreamId
-	case 1:
-		stm.hdr.Timestamp += hdr.Timestamp
-		stm.hdr.MessageLength = hdr.MessageLength
-		stm.hdr.MessageTypeId = hdr.MessageTypeId
-	case 2:
-		stm.hdr.Timestamp += hdr.Timestamp
-	case 3:
-		// see https://rtmp.veriskope.com/docs/spec/#53124-type-3
-		if stm.hdr != nil && stm.hdr.Format == 0 {
-			stm.hdr.Timestamp += stm.hdr.Timestamp
-		}
-
-		// read extend timestamp
-		if stm.hdr.Timestamp == 0x00ffffff {
-			buf := make([]byte, 4)
-			_, err := c.ReadFull(buf)
-			if err != nil {
-				return nil, nil, err
-			}
-			stm.hdr.Timestamp = binary.BigEndian.Uint32(buf)
-		}
-	default:
-		panic("unknown format type")
-	}
-
-	// calculate bytes needed.
-	need := uint32(math.Min(float64(stm.hdr.MessageLength-stm.read), float64(c.chunkSize)))
-
-	chunk := newChunk(c.chunkSize)
-	reader := ChunkReader{conn: c, chunk: chunk}
-	if _, err = reader.ReadN(need); err != nil {
-		return nil, nil, err
-	}
-	stm.read += need
-
-	return stm, chunk, nil
-}
-
-func (c *conn) readMessage() (*ChunkStream, *Message, error) {
+func (c *conn) readMessage() (*Message, error) {
 	msg := newMessage()
+	msg.conn = c
 	for {
-		cs, ck, err := c.readChunk()
+		err := msg.readChunk()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		msg.Header = cs.hdr
-		msg.append(ck)
+
 		if msg.completed() {
-			return cs, msg, nil
+			return msg, nil
 		}
 	}
 }

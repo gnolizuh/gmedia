@@ -24,9 +24,9 @@ import (
 	"math"
 )
 
-type TypeHandler func(*ChunkStream, *Message) error
-type UserHandler func(*ChunkStream, *Message) error
-type CommandHandler func(*ChunkStream, *Message) error
+type TypeHandler func(*Message) error
+type UserHandler func(*Message) error
+type CommandHandler func(*Message) error
 
 func init() {
 	regTypeHandlers()
@@ -50,15 +50,15 @@ func (mux *ServeMux) findTypeHandler(typ MessageType) TypeHandler {
 }
 
 // ServeMessage dispatches the message to the handler.
-func (mux *ServeMux) ServeMessage(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) ServeMessage(msg *Message) error {
 	h := mux.findTypeHandler(msg.Header.MessageTypeId)
 	if h == nil {
 		return errors.New("handler not found")
 	}
-	return h(cs, msg)
+	return h(msg)
 }
 
-func (mux *ServeMux) serveNull(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveNull(msg *Message) error {
 	return nil
 }
 
@@ -103,7 +103,7 @@ func regTypeHandlers() {
 	}
 }
 
-func (mux *ServeMux) serveSetChunkSize(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveSetChunkSize(msg *Message) error {
 	chunkSize, err := msg.ReadUInt32()
 	if err != nil {
 		return err
@@ -114,20 +114,20 @@ func (mux *ServeMux) serveSetChunkSize(cs *ChunkStream, msg *Message) error {
 		return errors.New("too big RTMP chunk size")
 	}
 
-	cs.conn.setChunkSize(chunkSize)
+	msg.ChunkStream.conn.setChunkSize(chunkSize)
 
 	log.Printf("set chunk size, chunk_size: %d", chunkSize)
 
 	return nil
 }
 
-func (mux *ServeMux) serveAbort(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveAbort(msg *Message) error {
 	csid, err := msg.ReadUInt32()
 	if err != nil {
 		return err
 	}
 
-	stm := cs.conn.chunkStreams[csid]
+	stm := msg.ChunkStream.conn.chunkStreams[csid]
 	stm.abort()
 
 	log.Printf("abort, csid: %d", csid)
@@ -135,19 +135,19 @@ func (mux *ServeMux) serveAbort(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveAcknowledgement(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveAcknowledgement(msg *Message) error {
 	seq, err := msg.ReadUInt32()
 	if err != nil {
 		return err
 	}
 
-	cs.conn.outLastAck = seq
+	msg.ChunkStream.conn.outLastAck = seq
 	log.Printf("acknowledgement, receive ack seq: %d", seq)
 
 	return nil
 }
 
-func (mux *ServeMux) serveUserControl(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveUserControl(msg *Message) error {
 	evt, err := msg.ReadUInt16()
 	if err != nil {
 		return err
@@ -161,19 +161,19 @@ func (mux *ServeMux) serveUserControl(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveWindowAcknowledgementSize(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveWindowAcknowledgementSize(msg *Message) error {
 	size, err := msg.ReadUInt32()
 	if err != nil {
 		return err
 	}
 
-	cs.conn.winAckSize = size
+	msg.ChunkStream.conn.winAckSize = size
 	log.Printf("window_acknowledgement_size, receive size: %d", size)
 
 	return nil
 }
 
-func (mux *ServeMux) serveSetPeerBandwidth(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveSetPeerBandwidth(msg *Message) error {
 	const (
 		LimitTypeHard = iota
 		LimitTypeSoft
@@ -192,50 +192,50 @@ func (mux *ServeMux) serveSetPeerBandwidth(cs *ChunkStream, msg *Message) error 
 
 	switch limit {
 	case LimitTypeHard:
-		cs.conn.bandwidth = bandwidth
+		msg.ChunkStream.conn.bandwidth = bandwidth
 	case LimitTypeSoft:
-		cs.conn.bandwidth = uint32(math.Min(float64(bandwidth), float64(cs.conn.bandwidth)))
+		msg.ChunkStream.conn.bandwidth = uint32(math.Min(float64(bandwidth), float64(msg.ChunkStream.conn.bandwidth)))
 	case LimitTypeDynamic:
-		if cs.conn.lastLimitType == LimitTypeHard {
-			cs.conn.bandwidth = bandwidth
+		if msg.ChunkStream.conn.lastLimitType == LimitTypeHard {
+			msg.ChunkStream.conn.bandwidth = bandwidth
 		}
 	}
 
-	cs.conn.lastLimitType = limit
+	msg.ChunkStream.conn.lastLimitType = limit
 	log.Printf("set peer bandwidth, bandwidth: %d, limit: %d", bandwidth, limit)
 
 	return nil
 }
 
-func (mux *ServeMux) serveAudio(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveAudio(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveVideo(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveVideo(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveAMF3Meta(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveAMF3Meta(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveAMF3Shared(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveAMF3Shared(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveAMF3Cmd(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveAMF3Cmd(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveAMF0Meta(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveAMF0Meta(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveAMF0Shared(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveAMF0Shared(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveAMF0Cmd(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveAMF0Cmd(msg *Message) error {
 	var name string
 	err := amf.NewDecoder().WithReader(msg).Decode(&name)
 	if err != nil {
@@ -245,7 +245,7 @@ func (mux *ServeMux) serveAMF0Cmd(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveAggregate(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveAggregate(msg *Message) error {
 	return nil
 }
 
@@ -275,7 +275,7 @@ func regUserHandlers() {
 }
 
 // serveUserStreamBegin handle UserControlMessage UserMessageTypeStreamBegin
-func (mux *ServeMux) serveUserStreamBegin(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveUserStreamBegin(msg *Message) error {
 	msid, err := msg.ReadUInt32()
 	if err != nil {
 		return err
@@ -287,7 +287,7 @@ func (mux *ServeMux) serveUserStreamBegin(cs *ChunkStream, msg *Message) error {
 }
 
 // serveUserStreamEOF handle UserControlMessage UserMessageTypeStreamEOF
-func (mux *ServeMux) serveUserStreamEOF(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveUserStreamEOF(msg *Message) error {
 	msid, err := msg.ReadUInt32()
 	if err != nil {
 		return err
@@ -299,7 +299,7 @@ func (mux *ServeMux) serveUserStreamEOF(cs *ChunkStream, msg *Message) error {
 }
 
 // serveUserStreamDry handle UserControlMessage UserMessageTypeStreamDry
-func (mux *ServeMux) serveUserStreamDry(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveUserStreamDry(msg *Message) error {
 	msid, err := msg.ReadUInt32()
 	if err != nil {
 		return err
@@ -311,7 +311,7 @@ func (mux *ServeMux) serveUserStreamDry(cs *ChunkStream, msg *Message) error {
 }
 
 // serveUserSetBufLen handle UserControlMessage UserMessageTypeStreamSetBufLen
-func (mux *ServeMux) serveUserSetBufLen(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveUserSetBufLen(msg *Message) error {
 	msid, err := msg.ReadUInt32()
 	if err != nil {
 		return err
@@ -327,7 +327,7 @@ func (mux *ServeMux) serveUserSetBufLen(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveUserIsRecorded(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveUserIsRecorded(msg *Message) error {
 	msid, err := msg.ReadUInt32()
 	if err != nil {
 		return err
@@ -338,7 +338,7 @@ func (mux *ServeMux) serveUserIsRecorded(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveUserPingRequest(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveUserPingRequest(msg *Message) error {
 	timestamp, err := msg.ReadUInt32()
 	if err != nil {
 		return err
@@ -351,7 +351,7 @@ func (mux *ServeMux) serveUserPingRequest(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveUserPingResponse(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveUserPingResponse(msg *Message) error {
 	timestamp, err := msg.ReadUInt32()
 	if err != nil {
 		return err
@@ -384,7 +384,7 @@ func regCommandHandlers() {
 	}
 }
 
-func (mux *ServeMux) serveConnect(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveConnect(msg *Message) error {
 	type Object struct {
 		App            string
 		FlashVer       string
@@ -397,7 +397,7 @@ func (mux *ServeMux) serveConnect(cs *ChunkStream, msg *Message) error {
 	}
 
 	var transactionID uint32
-	err := amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&transactionID)
+	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID)
 	if err != nil {
 		return err
 	}
@@ -407,56 +407,56 @@ func (mux *ServeMux) serveConnect(cs *ChunkStream, msg *Message) error {
 	}
 
 	var obj Object
-	err = amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&obj)
+	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&obj)
 	if err != nil {
 		log.Println(err)
 		return err
 	}
 
-	if err := cs.conn.SendAckWinSize(DefaultAckWindowSize); err != nil {
+	if err := msg.ChunkStream.conn.SendAckWinSize(DefaultAckWindowSize); err != nil {
 		return err
 	}
-	if err := cs.conn.SendSetPeerBandwidth(DefaultAckWindowSize, DefaultLimitDynamic); err != nil {
+	if err := msg.ChunkStream.conn.SendSetPeerBandwidth(DefaultAckWindowSize, DefaultLimitDynamic); err != nil {
 		return err
 	}
-	if err := cs.conn.SendSetChunkSize(DefaultChunkSize); err != nil {
+	if err := msg.ChunkStream.conn.SendSetChunkSize(DefaultChunkSize); err != nil {
 		return err
 	}
-	if err := cs.conn.SendOnBWDone(); err != nil {
+	if err := msg.ChunkStream.conn.SendOnBWDone(); err != nil {
 		return err
 	}
-	if err := cs.conn.SendConnectResult(transactionID, obj.ObjectEncoding); err != nil {
+	if err := msg.ChunkStream.conn.SendConnectResult(transactionID, obj.ObjectEncoding); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (mux *ServeMux) serveCall(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveCall(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveClose(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveClose(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveCreateStream(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveCreateStream(msg *Message) error {
 	var transactionID uint32
-	err := amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&transactionID)
+	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID)
 	if err != nil {
 		return err
 	}
 
-	if err := cs.conn.SendCreateStreamResult(transactionID, DefaultMessageStreamID); err != nil {
+	if err := msg.ChunkStream.conn.SendCreateStreamResult(transactionID, DefaultMessageStreamID); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (mux *ServeMux) serveCloseStream(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveCloseStream(msg *Message) error {
 	var stream float64
-	err := amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&stream)
+	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&stream)
 	if err != nil {
 		return err
 	}
@@ -466,24 +466,24 @@ func (mux *ServeMux) serveCloseStream(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveReceiveAudio(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveReceiveAudio(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveReceiveVideo(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveReceiveVideo(msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveDeleteStream(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveDeleteStream(msg *Message) error {
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var stream float64
-	err = amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&stream)
+	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&stream)
 	if err != nil {
 		return err
 	}
@@ -493,16 +493,16 @@ func (mux *ServeMux) serveDeleteStream(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) servePublish(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) servePublish(msg *Message) error {
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var name, typo string
-	err = amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&name, &typo)
+	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&name, &typo)
 	if err != nil {
 		return err
 	}
@@ -512,16 +512,16 @@ func (mux *ServeMux) servePublish(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) servePlay(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) servePlay(msg *Message) error {
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var name string
-	err = amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&name)
+	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&name)
 	if err != nil {
 		return err
 	}
@@ -530,7 +530,7 @@ func (mux *ServeMux) servePlay(cs *ChunkStream, msg *Message) error {
 
 	var start, duration float64
 	var reset bool
-	err = amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&start, &duration, &reset)
+	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&start, &duration, &reset)
 	if err != nil {
 		return err
 	}
@@ -538,7 +538,7 @@ func (mux *ServeMux) servePlay(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) servePlay2(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) servePlay2(msg *Message) error {
 	type Object struct {
 		Start      float64
 		StreamName string
@@ -546,13 +546,13 @@ func (mux *ServeMux) servePlay2(cs *ChunkStream, msg *Message) error {
 
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var obj Object
-	err = amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&obj)
+	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&obj)
 	if err != nil {
 		log.Println(err)
 		return err
@@ -563,16 +563,16 @@ func (mux *ServeMux) servePlay2(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) serveSeek(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) serveSeek(msg *Message) error {
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var offset float64
-	err = amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&offset)
+	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&offset)
 	if err != nil {
 		return err
 	}
@@ -582,17 +582,17 @@ func (mux *ServeMux) serveSeek(cs *ChunkStream, msg *Message) error {
 	return nil
 }
 
-func (mux *ServeMux) servePause(cs *ChunkStream, msg *Message) error {
+func (mux *ServeMux) servePause(msg *Message) error {
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var pause bool
 	var position float64
-	err = amf.NewDecoder().WithReader(cs.conn.bufr).Decode(&pause, &position)
+	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&pause, &position)
 	if err != nil {
 		return err
 	}

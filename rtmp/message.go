@@ -139,24 +139,32 @@ type ChunkReader struct {
 }
 
 func (cr ChunkReader) ReadN(n uint32) (int, error) {
-	m, err := cr.conn.ReadFull(cr.chunk.bytes(n))
+	w, err := cr.conn.ReadFull(cr.chunk.bytes(OffsetWrite, n))
 	if err != nil {
-		return m, err
+		return w, err
 	}
-	cr.chunk.offs += uint32(m)
-	return m, nil
+	cr.chunk.offw += uint32(w)
+	return w, nil
 }
+
+type OffsetType int8
+
+const (
+	OffsetRead OffsetType = iota
+	OffsetWrite
+	OffsetSend
+)
 
 // Chunk RTMP message chunk declare.
 type Chunk struct {
 	msg *Message
 
 	// specifies RTMP ChunkSize.
-	size uint32
+	s uint32
 
 	buf []byte
 
-	// for reading
+	// offset for reading, writing and sending.
 	offr, offw, offs, head uint32
 }
 
@@ -166,7 +174,7 @@ func newChunk(chunkSize uint32) *Chunk {
 	if v := chunkPool.Get(); v != nil {
 		chunk := v.(*Chunk)
 		chunk.msg = nil
-		chunk.size = chunkSize
+		chunk.s = chunkSize
 		chunk.buf = make([]byte, chunkSize+MaxHeaderBufferSize)
 		chunk.offr = MaxHeaderBufferSize
 		chunk.offw = MaxHeaderBufferSize
@@ -175,7 +183,7 @@ func newChunk(chunkSize uint32) *Chunk {
 		return chunk
 	}
 	return &Chunk{
-		size: chunkSize,
+		s:    chunkSize,
 		buf:  make([]byte, chunkSize+MaxHeaderBufferSize),
 		offr: MaxHeaderBufferSize,
 		offw: MaxHeaderBufferSize,
@@ -188,17 +196,25 @@ func (chunk *Chunk) reset(n uint32) {
 	if n > chunk.head {
 		panic(fmt.Sprintf("chunk reset overflow: %d > %d", n, chunk.head))
 	}
-
 	chunk.head -= n
 	chunk.offs = chunk.head
 }
 
-func (chunk *Chunk) bytes(n uint32) []byte {
-	return chunk.buf[chunk.offr : chunk.offr+n]
+func (chunk *Chunk) bytes(typ OffsetType, n uint32) []byte {
+	var off uint32
+	switch typ {
+	case OffsetRead:
+		off = chunk.offr
+	case OffsetWrite:
+		off = chunk.offw
+	case OffsetSend:
+		off = chunk.offs
+	}
+	return chunk.buf[off : off+n]
 }
 
-func (chunk *Chunk) length() uint32 {
-	return chunk.offs - chunk.head
+func (chunk *Chunk) size() uint32 {
+	return chunk.offw - chunk.head
 }
 
 func (chunk *Chunk) Send(w io.Writer) error {
@@ -214,7 +230,7 @@ func (chunk *Chunk) Send(w io.Writer) error {
 
 func (chunk *Chunk) Read(p []byte) (int, error) {
 	n := float64(len(p))
-	m := float64(len(chunk.buf[chunk.offr:]))
+	m := float64(len(chunk.buf[chunk.offr:chunk.offw]))
 	if r := uint32(math.Min(n, m)); r > 0 {
 		copy(p, chunk.buf[chunk.offr:chunk.offr+r])
 		chunk.offr += r
@@ -256,9 +272,9 @@ func (chunk *Chunk) WriteByte(b byte) error {
 type Chunks struct {
 	chunks []*Chunk
 
-	length uint32
+	s uint32
 
-	// for reading, writing and sending
+	// index of array for reading, writing and sending
 	offr, offw, offs uint32
 }
 
@@ -273,12 +289,12 @@ func (chunks *Chunks) len() uint32 {
 }
 
 func (chunks *Chunks) size() uint32 {
-	return chunks.length
+	return chunks.s
 }
 
 func (chunks *Chunks) append(chunk *Chunk) {
 	chunks.chunks = append(chunks.chunks, chunk)
-	chunks.length += chunk.length()
+	chunks.s += chunk.size()
 }
 
 // Read reads data into p. It returns the number of bytes
@@ -289,7 +305,7 @@ func (chunks *Chunks) append(chunk *Chunk) {
 func (chunks *Chunks) Read(p []byte) (int, error) {
 	l := len(p)
 	r := 0
-	for chunks.offr < chunks.size() {
+	for chunks.offr < chunks.len() {
 		ch := chunks.chunks[chunks.offr]
 		n, err := ch.Read(p[r:])
 		if err != nil {
@@ -297,12 +313,10 @@ func (chunks *Chunks) Read(p []byte) (int, error) {
 		}
 		r += n
 		l -= n
-		if len(ch.buf[ch.offr:]) == 0 {
-			chunks.offr++
-		}
 		if l == 0 {
 			return r, nil
 		}
+		chunks.offr++
 	}
 	return r, io.EOF
 }
@@ -318,12 +332,10 @@ func (chunks *Chunks) Write(p []byte) (int, error) {
 		}
 		w += n
 		l -= n
-		if len(ch.buf[ch.offw:]) == 0 {
-			chunks.offw++
-		}
 		if l == 0 {
 			return w, nil
 		}
+		chunks.offw++
 	}
 	return w, io.EOF
 }
@@ -535,7 +547,7 @@ var messagePool sync.Pool
 // Timestamp: Four-byte field that contains a timestamp of
 // the message. The 4 bytes are packed in the big-endian order.
 //
-// Message ChunkStream Id: Three-byte field that identifies the
+// Message ChunkStream ID: Three-byte field that identifies the
 // stream of the message. These bytes are set in big-endian format.
 //
 // 0                   1                   2                   3
@@ -551,15 +563,20 @@ var messagePool sync.Pool
 // |                 (3 bytes)                     |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 type Message struct {
-	Header *Header
-	Chunks *Chunks
-	read   uint32
+	Header      Header
+	ChunkStream *ChunkStream
+	Chunks      *Chunks
+
+	conn *conn
+
+	// size we have
+	hs uint32
 }
 
 func newMessage() *Message {
 	if v := messagePool.Get(); v != nil {
 		m := v.(*Message)
-		m.read = 0
+		m.hs = 0
 		return m
 	}
 	return &Message{
@@ -569,11 +586,75 @@ func newMessage() *Message {
 
 func (m *Message) append(chunk *Chunk) {
 	m.Chunks.append(chunk)
-	m.read += chunk.length()
+	m.hs += chunk.size()
 }
 
 func (m *Message) completed() bool {
-	return m.Header != nil && m.Header.MessageLength == m.read
+	return m.Header.MessageLength == m.hs
+}
+
+func (m *Message) readChunk() error {
+	err := readHeader(m.conn, &m.Header)
+	if err != nil {
+		return err
+	}
+
+	// indicate timestamp whether is absolute or relate.
+	cs := &m.conn.chunkStreams[m.Header.ChunkStreamId]
+	if m.ChunkStream == nil {
+		m.ChunkStream = cs
+	} else if m.ChunkStream != cs {
+		panic("chunk-stream must be strictly continuous")
+	}
+
+	if cs.hdr == nil {
+		cs.hdr = newHeader()
+	}
+
+	cs.hdr.Format = m.Header.Format
+	cs.hdr.ChunkStreamId = m.Header.ChunkStreamId
+	switch m.Header.Format {
+	case 0:
+		cs.hdr.Timestamp = m.Header.Timestamp
+		cs.hdr.MessageLength = m.Header.MessageLength
+		cs.hdr.MessageTypeId = m.Header.MessageTypeId
+		cs.hdr.MessageStreamId = m.Header.MessageStreamId
+	case 1:
+		cs.hdr.Timestamp += m.Header.Timestamp
+		cs.hdr.MessageLength = m.Header.MessageLength
+		cs.hdr.MessageTypeId = m.Header.MessageTypeId
+	case 2:
+		cs.hdr.Timestamp += m.Header.Timestamp
+	case 3:
+		// see https://rtmp.veriskope.com/docs/spec/#53124-type-3
+		if cs.hdr != nil && cs.hdr.Format == 0 {
+			cs.hdr.Timestamp += cs.hdr.Timestamp
+		}
+
+		// read extend timestamp
+		if cs.hdr.Timestamp == 0x00ffffff {
+			buf := make([]byte, 4)
+			_, err := m.conn.ReadFull(buf)
+			if err != nil {
+				return err
+			}
+			cs.hdr.Timestamp = binary.BigEndian.Uint32(buf)
+		}
+	default:
+		panic("unknown format type")
+	}
+
+	// calculate bytes needed.
+	need := uint32(math.Min(float64(cs.hdr.MessageLength-m.hs), float64(m.conn.chunkSize)))
+
+	ck := newChunk(m.conn.chunkSize)
+	reader := ChunkReader{conn: m.conn, chunk: ck}
+	if _, err = reader.ReadN(need); err != nil {
+		return err
+	}
+	m.append(ck)
+
+	return nil
 }
 
 func (m *Message) Send(w io.Writer) error {
@@ -669,7 +750,7 @@ func (m *Message) prepare(prev *Header) error {
 	}
 
 	if prev != nil {
-		*prev = *m.Header
+		*prev = m.Header
 		prev.MessageLength = size
 	}
 

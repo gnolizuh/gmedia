@@ -37,7 +37,7 @@ type tcpKeepAliveListener struct {
 //}
 
 type Handler interface {
-	ServeMessage(*ChunkStream, *Message) error
+	ServeMessage(*Message) error
 }
 
 type Server struct {
@@ -122,10 +122,10 @@ var (
 	handlerType = reflect.TypeOf((*Handler)(nil)).Elem()
 )
 
-func (sh *serverHandler) ServeMessage(cs *ChunkStream, msg *Message) error {
+func (sh *serverHandler) ServeMessage(msg *Message) error {
 	th := sh.srv.TypeHandlers[msg.Header.MessageTypeId]
 	if th != nil {
-		return th(cs, msg)
+		return th(msg)
 	}
 
 	e := reflect.ValueOf(sh.srv.Handler).Elem()
@@ -133,11 +133,11 @@ func (sh *serverHandler) ServeMessage(cs *ChunkStream, msg *Message) error {
 	for i := 0; i < e.NumField(); i++ {
 		if t.Field(i).Type.Implements(handlerType) {
 			handler := sh.srv.Handler.(Handler)
-			return handler.ServeMessage(cs, msg)
+			return handler.ServeMessage(msg)
 		}
 	}
 
-	return DefaultServeMux.ServeMessage(cs, msg)
+	return DefaultServeMux.ServeMessage(msg)
 }
 
 // --------------------------------------------- conn --------------------------------------------- //
