@@ -143,7 +143,7 @@ func (cr ChunkReader) ReadN(n uint32) (int, error) {
 	if err != nil {
 		return w, err
 	}
-	cr.chunk.offw += uint32(w)
+	cr.chunk.w += uint32(w)
 	return w, nil
 }
 
@@ -160,12 +160,12 @@ type Chunk struct {
 	msg *Message
 
 	// specifies RTMP ChunkSize.
-	s uint32
+	sz uint32
 
 	buf []byte
 
 	// offset for reading, writing and sending.
-	offr, offw, offs, head uint32
+	r, w, s, head uint32
 }
 
 var chunkPool sync.Pool
@@ -174,21 +174,21 @@ func newChunk(chunkSize uint32) *Chunk {
 	if v := chunkPool.Get(); v != nil {
 		chunk := v.(*Chunk)
 		chunk.msg = nil
-		chunk.s = chunkSize
+		chunk.sz = chunkSize
 		chunk.buf = make([]byte, chunkSize+MaxHeaderBufferSize)
-		chunk.offr = MaxHeaderBufferSize
-		chunk.offw = MaxHeaderBufferSize
+		chunk.r = MaxHeaderBufferSize
+		chunk.w = MaxHeaderBufferSize
 		chunk.head = MaxHeaderBufferSize
-		chunk.offs = MaxHeaderBufferSize
+		chunk.s = MaxHeaderBufferSize
 		return chunk
 	}
 	return &Chunk{
-		s:    chunkSize,
+		sz:   chunkSize,
 		buf:  make([]byte, chunkSize+MaxHeaderBufferSize),
-		offr: MaxHeaderBufferSize,
-		offw: MaxHeaderBufferSize,
+		r:    MaxHeaderBufferSize,
+		w:    MaxHeaderBufferSize,
 		head: MaxHeaderBufferSize,
-		offs: MaxHeaderBufferSize,
+		s:    MaxHeaderBufferSize,
 	}
 }
 
@@ -197,43 +197,43 @@ func (chunk *Chunk) reset(n uint32) {
 		panic(fmt.Sprintf("chunk reset overflow: %d > %d", n, chunk.head))
 	}
 	chunk.head -= n
-	chunk.offs = chunk.head
+	chunk.s = chunk.head
 }
 
 func (chunk *Chunk) bytes(typ OffsetType, n uint32) []byte {
 	var off uint32
 	switch typ {
 	case OffsetRead:
-		off = chunk.offr
+		off = chunk.r
 	case OffsetWrite:
-		off = chunk.offw
+		off = chunk.w
 	case OffsetSend:
-		off = chunk.offs
+		off = chunk.s
 	}
 	return chunk.buf[off : off+n]
 }
 
 func (chunk *Chunk) size() uint32 {
-	return chunk.offw - chunk.head
+	return chunk.w - chunk.head
 }
 
 func (chunk *Chunk) Send(w io.Writer) error {
-	for chunk.offs < chunk.offw {
-		n, err := w.Write(chunk.buf[chunk.offs:chunk.offw])
+	for chunk.s < chunk.w {
+		n, err := w.Write(chunk.buf[chunk.s:chunk.w])
 		if err != nil {
 			return err
 		}
-		chunk.offs += uint32(n)
+		chunk.s += uint32(n)
 	}
 	return nil
 }
 
 func (chunk *Chunk) Read(p []byte) (int, error) {
 	n := float64(len(p))
-	m := float64(len(chunk.buf[chunk.offr:chunk.offw]))
+	m := float64(len(chunk.buf[chunk.r:chunk.w]))
 	if r := uint32(math.Min(n, m)); r > 0 {
-		copy(p, chunk.buf[chunk.offr:chunk.offr+r])
-		chunk.offr += r
+		copy(p, chunk.buf[chunk.r:chunk.r+r])
+		chunk.r += r
 		return int(r), nil
 	}
 	return 0, io.EOF
@@ -241,10 +241,10 @@ func (chunk *Chunk) Read(p []byte) (int, error) {
 
 func (chunk *Chunk) Write(p []byte) (int, error) {
 	n := float64(len(p))
-	m := float64(len(chunk.buf[chunk.offw:]))
+	m := float64(len(chunk.buf[chunk.w:]))
 	if w := uint32(math.Min(n, m)); w > 0 {
-		copy(chunk.buf[chunk.offw:], p[:w])
-		chunk.offw += w
+		copy(chunk.buf[chunk.w:], p[:w])
+		chunk.w += w
 		return int(w), nil
 	}
 	return 0, io.EOF
@@ -272,10 +272,10 @@ func (chunk *Chunk) WriteByte(b byte) error {
 type Chunks struct {
 	chunks []*Chunk
 
-	s uint32
+	sz uint32
 
 	// index of array for reading, writing and sending
-	offr, offw, offs uint32
+	r, w, s uint32
 }
 
 func newChunks() *Chunks {
@@ -289,12 +289,12 @@ func (chunks *Chunks) len() uint32 {
 }
 
 func (chunks *Chunks) size() uint32 {
-	return chunks.s
+	return chunks.sz
 }
 
 func (chunks *Chunks) append(chunk *Chunk) {
 	chunks.chunks = append(chunks.chunks, chunk)
-	chunks.s += chunk.size()
+	chunks.sz += chunk.size()
 }
 
 // Read reads data into p. It returns the number of bytes
@@ -305,8 +305,8 @@ func (chunks *Chunks) append(chunk *Chunk) {
 func (chunks *Chunks) Read(p []byte) (int, error) {
 	l := len(p)
 	r := 0
-	for chunks.offr < chunks.len() {
-		ch := chunks.chunks[chunks.offr]
+	for chunks.r < chunks.len() {
+		ch := chunks.chunks[chunks.r]
 		n, err := ch.Read(p[r:])
 		if err != nil {
 			return r + n, err
@@ -316,7 +316,7 @@ func (chunks *Chunks) Read(p []byte) (int, error) {
 		if l == 0 {
 			return r, nil
 		}
-		chunks.offr++
+		chunks.r++
 	}
 	return r, io.EOF
 }
@@ -324,8 +324,8 @@ func (chunks *Chunks) Read(p []byte) (int, error) {
 func (chunks *Chunks) Write(p []byte) (int, error) {
 	l := len(p)
 	w := 0
-	for chunks.offw < chunks.len() {
-		ch := chunks.chunks[chunks.offw]
+	for chunks.w < chunks.len() {
+		ch := chunks.chunks[chunks.w]
 		n, err := ch.Write(p[w:])
 		if err != nil {
 			return w + n, err
@@ -335,20 +335,20 @@ func (chunks *Chunks) Write(p []byte) (int, error) {
 		if l == 0 {
 			return w, nil
 		}
-		chunks.offw++
+		chunks.w++
 	}
 	return w, io.EOF
 }
 
 func (chunks *Chunks) ReadByte() (byte, error) {
-	if chunks.offr < chunks.len() {
-		ch := chunks.chunks[chunks.offr]
+	if chunks.r < chunks.len() {
+		ch := chunks.chunks[chunks.r]
 		b, err := ch.ReadByte()
 		if err != nil {
 			return 0, err
 		}
-		if len(ch.buf[ch.offr:]) == 0 {
-			chunks.offr++
+		if len(ch.buf[ch.r:]) == 0 {
+			chunks.r++
 		}
 		return b, nil
 	}
@@ -356,14 +356,14 @@ func (chunks *Chunks) ReadByte() (byte, error) {
 }
 
 func (chunks *Chunks) WriteByte(c byte) error {
-	if chunks.offw < chunks.len() {
-		ch := chunks.chunks[chunks.offw]
+	if chunks.w < chunks.len() {
+		ch := chunks.chunks[chunks.w]
 		err := ch.WriteByte(c)
 		if err != nil {
 			return err
 		}
-		if len(ch.buf[ch.offw:]) == 0 {
-			chunks.offw++
+		if len(ch.buf[ch.w:]) == 0 {
+			chunks.w++
 		}
 		return nil
 	}
@@ -659,12 +659,12 @@ func (m *Message) readChunk() error {
 
 func (m *Message) Send(w io.Writer) error {
 	chunks := m.Chunks
-	for chunks.offs <= chunks.offw {
-		err := chunks.chunks[chunks.offs].Send(w)
+	for chunks.s <= chunks.w {
+		err := chunks.chunks[chunks.s].Send(w)
 		if err != nil {
 			return err
 		}
-		chunks.offs++
+		chunks.s++
 	}
 	return nil
 }
@@ -825,7 +825,7 @@ func (m *Message) prepare(prev *Header) error {
 	}
 
 	// set following chunk's fmt to be 3
-	for i := m.Chunks.offw + 1; i < m.Chunks.len(); i++ {
+	for i := m.Chunks.w + 1; i < m.Chunks.len(); i++ {
 		ch := m.Chunks.chunks[i]
 		ch.reset(ftsize)
 		ch.buf[ch.head] = fch.buf[fch.head] | 0xc0

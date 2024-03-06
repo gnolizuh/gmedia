@@ -236,12 +236,15 @@ func (mux *ServeMux) serveAMF0Shared(msg *Message) error {
 }
 
 func (mux *ServeMux) serveAMF0Cmd(msg *Message) error {
-	var name string
-	err := amf.NewDecoder().WithReader(msg).Decode(&name)
-	if err != nil {
-		log.Println(err)
+	var cmd string
+	if err := amf.NewDecoder().WithReader(msg).Decode(&cmd); err != nil {
 		return err
 	}
+
+	if ch, ok := mux.commandHandlers[cmd]; ok {
+		return ch(msg)
+	}
+
 	return nil
 }
 
@@ -397,7 +400,7 @@ func (mux *ServeMux) serveConnect(msg *Message) error {
 	}
 
 	var transactionID uint32
-	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID)
+	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID)
 	if err != nil {
 		return err
 	}
@@ -407,7 +410,7 @@ func (mux *ServeMux) serveConnect(msg *Message) error {
 	}
 
 	var obj Object
-	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&obj)
+	err = amf.NewDecoder().WithReader(msg).Decode(&obj)
 	if err != nil {
 		log.Println(err)
 		return err
@@ -442,7 +445,7 @@ func (mux *ServeMux) serveClose(msg *Message) error {
 
 func (mux *ServeMux) serveCreateStream(msg *Message) error {
 	var transactionID uint32
-	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID)
+	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID)
 	if err != nil {
 		return err
 	}
@@ -456,7 +459,7 @@ func (mux *ServeMux) serveCreateStream(msg *Message) error {
 
 func (mux *ServeMux) serveCloseStream(msg *Message) error {
 	var stream float64
-	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&stream)
+	err := amf.NewDecoder().WithReader(msg).Decode(&stream)
 	if err != nil {
 		return err
 	}
@@ -477,13 +480,13 @@ func (mux *ServeMux) serveReceiveVideo(msg *Message) error {
 func (mux *ServeMux) serveDeleteStream(msg *Message) error {
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var stream float64
-	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&stream)
+	err = amf.NewDecoder().WithReader(msg).Decode(&stream)
 	if err != nil {
 		return err
 	}
@@ -496,13 +499,13 @@ func (mux *ServeMux) serveDeleteStream(msg *Message) error {
 func (mux *ServeMux) servePublish(msg *Message) error {
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var name, typo string
-	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&name, &typo)
+	err = amf.NewDecoder().WithReader(msg).Decode(&name, &typo)
 	if err != nil {
 		return err
 	}
@@ -515,13 +518,13 @@ func (mux *ServeMux) servePublish(msg *Message) error {
 func (mux *ServeMux) servePlay(msg *Message) error {
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var name string
-	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&name)
+	err = amf.NewDecoder().WithReader(msg).Decode(&name)
 	if err != nil {
 		return err
 	}
@@ -530,7 +533,7 @@ func (mux *ServeMux) servePlay(msg *Message) error {
 
 	var start, duration float64
 	var reset bool
-	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&start, &duration, &reset)
+	err = amf.NewDecoder().WithReader(msg).Decode(&start, &duration, &reset)
 	if err != nil {
 		return err
 	}
@@ -546,13 +549,13 @@ func (mux *ServeMux) servePlay2(msg *Message) error {
 
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var obj Object
-	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&obj)
+	err = amf.NewDecoder().WithReader(msg).Decode(&obj)
 	if err != nil {
 		log.Println(err)
 		return err
@@ -566,13 +569,13 @@ func (mux *ServeMux) servePlay2(msg *Message) error {
 func (mux *ServeMux) serveSeek(msg *Message) error {
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var offset float64
-	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&offset)
+	err = amf.NewDecoder().WithReader(msg).Decode(&offset)
 	if err != nil {
 		return err
 	}
@@ -585,14 +588,14 @@ func (mux *ServeMux) serveSeek(msg *Message) error {
 func (mux *ServeMux) servePause(msg *Message) error {
 	var transactionID uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
 	if err != nil {
 		return err
 	}
 
 	var pause bool
 	var position float64
-	err = amf.NewDecoder().WithReader(msg.ChunkStream.conn.bufr).Decode(&pause, &position)
+	err = amf.NewDecoder().WithReader(msg).Decode(&pause, &position)
 	if err != nil {
 		return err
 	}
