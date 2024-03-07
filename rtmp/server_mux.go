@@ -369,6 +369,15 @@ func (mux *ServeMux) serveUserPingResponse(msg *Message) error {
 
 // ---------------------------------- Command Messages ---------------------------------- //
 
+type Command map[string]any
+
+func (cmd Command) get(k string) string {
+	if v, ok := cmd[k]; ok {
+		return v.(string)
+	}
+	return ""
+}
+
 func regCommandHandlers() {
 	defaultServeMux.commandHandlers = map[string]CommandHandler{
 		"connect":      defaultServeMux.serveConnect,
@@ -388,19 +397,10 @@ func regCommandHandlers() {
 }
 
 func (mux *ServeMux) serveConnect(msg *Message) error {
-	type Object struct {
-		App            string
-		FlashVer       string
-		SwfURL         string
-		TcURL          string
-		AudioCodecs    uint32
-		VideoCodecs    uint32
-		PageUrl        string
-		ObjectEncoding uint32
-	}
-
 	var transactionID uint32
-	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID)
+	dec := amf.NewDecoder().WithReader(msg)
+
+	err := dec.Decode(&transactionID)
 	if err != nil {
 		return err
 	}
@@ -409,9 +409,8 @@ func (mux *ServeMux) serveConnect(msg *Message) error {
 		return errors.New(fmt.Sprintf("unexpected transaction ID: %d", transactionID))
 	}
 
-	var obj Object
-	err = amf.NewDecoder().WithReader(msg).Decode(&obj)
-	if err != nil {
+	var obj Command
+	if err = dec.Decode(&obj); err != nil {
 		log.Println(err)
 		return err
 	}
@@ -428,9 +427,11 @@ func (mux *ServeMux) serveConnect(msg *Message) error {
 	if err := msg.ChunkStream.conn.SendOnBWDone(); err != nil {
 		return err
 	}
-	if err := msg.ChunkStream.conn.SendConnectResult(transactionID, obj.ObjectEncoding); err != nil {
+	if err := msg.ChunkStream.conn.SendConnectResult(transactionID, 0); err != nil {
 		return err
 	}
+
+	log.Printf("connect: app=%s flashVer=%s tcUrl=%s", obj.get("app"), obj.get("flashVer"), obj.get("tcUrl"))
 
 	return nil
 }
