@@ -42,8 +42,8 @@ const (
 	// + max 4  extended header (timestamp)
 	MaxHeaderBufferSize = MaxBasicHeaderSize + MaxMessageHeaderSize + MaxExtendHeaderSize
 
-	DefaultReadChunkSize = 128
-	DefaultChunkSize     = 4096
+	DefaultReadChunkSize  = 128
+	DefaultWriteChunkSize = 4096
 
 	MaxStreamsNum = 32
 
@@ -122,36 +122,36 @@ type conn struct {
 	peer Peer
 }
 
-func (c *conn) setState(nc net.Conn, state ConnState) {
+func (conn *conn) setState(nc net.Conn, state ConnState) {
 	if state > StateServerDone || state < StateServerRecvChallenge {
 		panic("internal error")
 	}
-	c.state.Store(uint32(state))
-	if hook := c.server.ConnState; hook != nil {
+	conn.state.Store(uint32(state))
+	if hook := conn.server.ConnState; hook != nil {
 		hook(nc, state)
 	}
 }
 
 // serve a new connection.
-func (c *conn) serve() {
-	if ra := c.rwc.RemoteAddr(); ra != nil {
-		c.remoteAddr = ra.String()
+func (conn *conn) serve() {
+	if ra := conn.rwc.RemoteAddr(); ra != nil {
+		conn.remoteAddr = ra.String()
 	}
 
-	err := c.handshake()
+	err := conn.handshake()
 	if err != nil {
 		panic(err)
 		return
 	}
 
 	for {
-		msg, err := c.readMessage()
+		msg, err := conn.readMessage()
 		if err != nil {
 			panic(err)
 			return
 		}
 
-		sh := serverHandler{c.server}
+		sh := serverHandler{conn.server}
 		if err = sh.ServeMessage(msg); err != nil {
 			panic(err)
 			return
@@ -159,46 +159,14 @@ func (c *conn) serve() {
 	}
 }
 
-func (c *conn) setChunkSize(chunkSize uint32) {
-	if c.chunkSize != chunkSize {
-		c.chunkSize = chunkSize
+func (conn *conn) setChunkSize(chunkSize uint32) {
+	if conn.chunkSize != chunkSize {
+		conn.chunkSize = chunkSize
 	}
 }
 
-func (c *conn) Read(p []byte) (int, error) {
-	n, err := c.bufr.Read(p)
-
-	c.inBytes += uint32(n)
-
-	if c.inBytes >= 0xf0000000 {
-		c.inBytes = 0
-		c.inLastAck = 0
-	}
-
-	if c.winAckSize > 0 && c.inBytes-c.inLastAck >= c.winAckSize {
-		c.inLastAck = c.inBytes
-		if err = c.SendAck(c.inBytes); err != nil {
-			return n, err
-		}
-	}
-
-	return n, err
-}
-
-func (c *conn) ReadFull(buf []byte) (n int, err error) {
-	n, err = io.ReadFull(c, buf)
-	if err != nil || n != len(buf) {
-		if err == nil {
-			err = errors.New("insufficient bytes were read")
-		}
-		return n, err
-	}
-	return n, nil
-}
-
-func (c *conn) readMessage() (*Message, error) {
-	msg := newMessage()
-	msg.conn = c
+func (conn *conn) readMessage() (*Message, error) {
+	msg := conn.NewMessage()
 	for {
 		err := msg.readChunk()
 		if err != nil {
@@ -211,65 +179,89 @@ func (c *conn) readMessage() (*Message, error) {
 	}
 }
 
-func (c *conn) SendAck(seq uint32) error {
-	msg := newMessage()
-	msg.alloc(4)
+func (conn *conn) NewMessage() *Message {
+	if v := messagePool.Get(); v != nil {
+		msg := v.(*Message)
+		msg.has = 0
+		msg.conn = conn
+		msg.Chunks = msg.NewChunks()
+		return msg
+	}
+	msg := &Message{
+		conn: conn,
+	}
+	msg.Chunks = msg.NewChunks()
+	return msg
+}
 
+func (conn *conn) Read(p []byte) (int, error) {
+	n, err := conn.bufr.Read(p)
+
+	conn.inBytes += uint32(n)
+
+	if conn.inBytes >= 0xf0000000 {
+		conn.inBytes = 0
+		conn.inLastAck = 0
+	}
+
+	if conn.winAckSize > 0 && conn.inBytes-conn.inLastAck >= conn.winAckSize {
+		conn.inLastAck = conn.inBytes
+		if err = conn.SendAck(conn.inBytes); err != nil {
+			return n, err
+		}
+	}
+
+	return n, err
+}
+
+func (conn *conn) ReadFull(buf []byte) (n int, err error) {
+	n, err = io.ReadFull(conn, buf)
+	if err != nil || n != len(buf) {
+		if err == nil {
+			err = errors.New("insufficient bytes were read")
+		}
+		return n, err
+	}
+	return n, nil
+}
+
+func (conn *conn) SendAck(seq uint32) error {
+	msg := conn.NewMessage()
 	_ = binary.Write(msg, binary.BigEndian, seq)
-	_ = msg.prepare(nil)
-
-	return msg.Send(c.rwc)
+	return msg.Send()
 }
 
-func (c *conn) SendAckWinSize(win uint32) error {
-	msg := newMessage()
-	msg.alloc(4)
-
+func (conn *conn) SendAckWinSize(win uint32) error {
+	msg := conn.NewMessage()
 	_ = binary.Write(msg, binary.BigEndian, win)
-	_ = msg.prepare(nil)
-
-	return msg.Send(c.rwc)
+	return msg.Send()
 }
 
-func (c *conn) SendSetPeerBandwidth(win uint32, limit uint8) error {
-	msg := newMessage()
-	msg.alloc(5)
-
+func (conn *conn) SendSetPeerBandwidth(win uint32, limit uint8) error {
+	msg := conn.NewMessage()
 	_ = binary.Write(msg, binary.BigEndian, win)
 	_ = msg.WriteByte(limit)
-	_ = msg.prepare(nil)
-
-	return msg.Send(c.rwc)
+	return msg.Send()
 }
 
-func (c *conn) SendSetChunkSize(cs uint32) error {
-	msg := newMessage()
-
-	msg.alloc(4)
+func (conn *conn) SendSetChunkSize(cs uint32) error {
+	msg := conn.NewMessage()
 	_ = binary.Write(msg, binary.BigEndian, cs)
-	_ = msg.prepare(nil)
-
-	return msg.Send(c.rwc)
+	return msg.Send()
 }
 
-func (c *conn) SendOnBWDone() error {
-	msg := newMessage()
+func (conn *conn) SendOnBWDone() error {
+	msg := conn.NewMessage()
 	b, _ := amf.Marshal([]any{"onBWDone", 0, nil})
-	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
-	_ = msg.prepare(nil)
-
-	return msg.Send(c.rwc)
+	return msg.Send()
 }
 
-func (c *conn) SendConnectResult(trans uint32, encoding uint32) error {
-	msg := newMessage()
-
+func (conn *conn) SendConnectResult(trans uint32, encoding uint32) error {
 	type Object struct {
 		FMSVer       string `amf:"fmsVer"`
 		Capabilities uint32 `amf:"capabilities"`
 	}
-
 	type Info struct {
 		Level          string `amf:"level"`
 		Code           string `amf:"code"`
@@ -287,52 +279,39 @@ func (c *conn) SendConnectResult(trans uint32, encoding uint32) error {
 		Description:    "Connection succeeded.",
 		ObjectEncoding: encoding,
 	}
+
 	b, _ := amf.Marshal([]any{"_result", trans, obj, inf})
-	msg.alloc(uint32(len(b)))
+	msg := conn.NewMessage()
 	_, _ = msg.Write(b)
-	_ = msg.prepare(nil)
-
-	return msg.Send(c.rwc)
+	return msg.Send()
 }
 
-func (c *conn) SendReleaseStreamResult(trans uint32) error {
-	msg := newMessage()
+func (conn *conn) SendReleaseStreamResult(trans uint32) error {
+	msg := conn.NewMessage()
 	var nullArray []uint32
 	b, _ := amf.Marshal([]any{"_result", trans, nil, nullArray})
-	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
-	_ = msg.prepare(nil)
-
-	return msg.Send(c.rwc)
+	return msg.Send()
 }
 
-func (c *conn) SendOnFCPublish(trans uint32) error {
-	msg := newMessage()
+func (conn *conn) SendOnFCPublish(trans uint32) error {
+	msg := conn.NewMessage()
 	b, _ := amf.Marshal([]any{"onFCPublish", trans, nil})
-	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
-	_ = msg.prepare(nil)
-
-	return msg.Send(c.rwc)
+	return msg.Send()
 }
 
-func (c *conn) SendFCPublishResult(trans uint32) error {
-	msg := newMessage()
+func (conn *conn) SendFCPublishResult(trans uint32) error {
+	msg := conn.NewMessage()
 	var nullArray []uint32
 	b, _ := amf.Marshal([]any{"_result", trans, nil, nullArray})
-	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
-	_ = msg.prepare(nil)
-
-	return msg.Send(c.rwc)
+	return msg.Send()
 }
 
-func (c *conn) SendCreateStreamResult(trans uint32, stream uint32) error {
-	msg := newMessage()
+func (conn *conn) SendCreateStreamResult(trans uint32, stream uint32) error {
+	msg := conn.NewMessage()
 	b, _ := amf.Marshal([]any{"_result", trans, nil, stream})
-	msg.alloc(uint32(len(b)))
 	_, _ = msg.Write(b)
-	_ = msg.prepare(nil)
-
-	return msg.Send(c.rwc)
+	return msg.Send()
 }

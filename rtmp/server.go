@@ -123,7 +123,7 @@ var (
 )
 
 func (sh *serverHandler) ServeMessage(msg *Message) error {
-	th := sh.srv.TypeHandlers[msg.Header.MessageTypeId]
+	th := sh.srv.TypeHandlers[msg.MessageTypeId]
 	if th != nil {
 		return th(msg)
 	}

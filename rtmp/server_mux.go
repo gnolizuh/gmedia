@@ -51,7 +51,7 @@ func (mux *ServeMux) findTypeHandler(typ MessageType) TypeHandler {
 
 // ServeMessage dispatches the message to the handler.
 func (mux *ServeMux) ServeMessage(msg *Message) error {
-	h := mux.findTypeHandler(msg.Header.MessageTypeId)
+	h := mux.findTypeHandler(msg.MessageTypeId)
 	if h == nil {
 		return errors.New("handler not found")
 	}
@@ -421,7 +421,7 @@ func (mux *ServeMux) serveConnect(msg *Message) error {
 	if err := msg.ChunkStream.conn.SendSetPeerBandwidth(DefaultAckWindowSize, DefaultLimitDynamic); err != nil {
 		return err
 	}
-	if err := msg.ChunkStream.conn.SendSetChunkSize(DefaultChunkSize); err != nil {
+	if err := msg.ChunkStream.conn.SendSetChunkSize(DefaultWriteChunkSize); err != nil {
 		return err
 	}
 	if err := msg.ChunkStream.conn.SendOnBWDone(); err != nil {

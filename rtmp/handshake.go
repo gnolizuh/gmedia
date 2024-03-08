@@ -156,29 +156,29 @@ func makeRandom(p []byte) {
 	}
 }
 
-func (c *conn) handshake() error {
+func (conn *conn) handshake() error {
 	var err error
 	for {
-		state := ConnState(c.state.Load())
+		state := ConnState(conn.state.Load())
 		switch state {
 		case StateServerRecvChallenge:
-			err = c.recvChallenge(ClientPartialKey, ServerFullKey)
+			err = conn.recvChallenge(ClientPartialKey, ServerFullKey)
 		case StateServerSendChallenge:
-			err = c.sendChallenge(ServerVersion, ServerPartialKey)
+			err = conn.sendChallenge(ServerVersion, ServerPartialKey)
 		case StateServerSendResponse:
-			err = c.sendResponse()
+			err = conn.sendResponse()
 		case StateServerRecvResponse:
-			err = c.recvResponse()
+			err = conn.recvResponse()
 		case StateServerDone:
 			return nil
 		case StateClientSendChallenge:
-			err = c.sendChallenge(ClientVersion, ClientPartialKey)
+			err = conn.sendChallenge(ClientVersion, ClientPartialKey)
 		case StateClientRecvChallenge:
-			err = c.recvChallenge(ServerPartialKey, ClientFullKey)
+			err = conn.recvChallenge(ServerPartialKey, ClientFullKey)
 		case StateClientSendResponse:
-			err = c.sendResponse()
+			err = conn.sendResponse()
 		case StateClientRecvResponse:
-			err = c.recvResponse()
+			err = conn.recvResponse()
 		case StataClientDone:
 			return nil
 		default:
@@ -189,22 +189,22 @@ func (c *conn) handshake() error {
 			return err
 		}
 
-		c.setState(c.rwc, state+1)
+		conn.setState(conn.rwc, state+1)
 	}
 
 	return nil
 }
 
 // sendChallenge send S0 + S1
-func (c *conn) sendChallenge(version, peerKey []byte) error {
+func (conn *conn) sendChallenge(version, peerKey []byte) error {
 	s01 := make([]byte, HandshakeChallengeSize)
 
 	// s0, version MUST be 0x03
 	s01[0] = ProtoVersion
 
 	// s1
-	binary.BigEndian.PutUint32(s01[1:5], c.epoch) // timestamp
-	copy(s01[5:9], version)                       // version(zero)
+	binary.BigEndian.PutUint32(s01[1:5], conn.epoch) // timestamp
+	copy(s01[5:9], version)                          // version(zero)
 
 	makeRandom(s01[9:]) // random
 	err := writeDigest(s01[1:], peerKey, 8)
@@ -212,18 +212,18 @@ func (c *conn) sendChallenge(version, peerKey []byte) error {
 		return err
 	}
 
-	_, err = c.bufw.Write(s01)
+	_, err = conn.bufw.Write(s01)
 	if err != nil {
 		return err
 	}
 
-	return c.bufw.Flush()
+	return conn.bufw.Flush()
 }
 
 // recvChallenge recv C0 + C1
-func (c *conn) recvChallenge(peerKey, key []byte) error {
+func (conn *conn) recvChallenge(peerKey, key []byte) error {
 	c01 := make([]byte, HandshakeChallengeSize)
-	if _, err := c.ReadFull(c01); err != nil {
+	if _, err := conn.ReadFull(c01); err != nil {
 		return err
 	}
 
@@ -233,9 +233,9 @@ func (c *conn) recvChallenge(peerKey, key []byte) error {
 	}
 
 	// c1
-	c.incomingEpoch = binary.BigEndian.Uint32(c01[1:5]) // timestamp
+	conn.incomingEpoch = binary.BigEndian.Uint32(c01[1:5]) // timestamp
 
-	log.Printf("handshake: peer version=%d.%d.%d.%d epoch=%d", c01[8], c01[7], c01[6], c01[5], c.incomingEpoch)
+	log.Printf("handshake: peer version=%d.%d.%d.%d epoch=%d", c01[8], c01[7], c01[6], c01[5], conn.incomingEpoch)
 
 	if binary.BigEndian.Uint32(c01[5:9]) == 0 {
 		return nil
@@ -250,7 +250,7 @@ func (c *conn) recvChallenge(peerKey, key []byte) error {
 	}
 
 	var err error
-	c.digest, err = makeDigestWhole(c01[1+s:1+s+HandshakeKeyLen], key)
+	conn.digest, err = makeDigestWhole(c01[1+s:1+s+HandshakeKeyLen], key)
 	if err != nil {
 		return err
 	}
@@ -259,31 +259,31 @@ func (c *conn) recvChallenge(peerKey, key []byte) error {
 }
 
 // sendResponse send S2
-func (c *conn) sendResponse() error {
+func (conn *conn) sendResponse() error {
 	s2 := make([]byte, HandshakeResponseSize)
 
 	// s2
 	makeRandom(s2)
 	s := HandshakeResponseSize - HandshakeKeyLen
-	hs, err := makeDigest(s2, c.digest, s)
+	hs, err := makeDigest(s2, conn.digest, s)
 	if err != nil {
 		return err
 	}
 	copy(s2[s:], hs)
 
-	_, err = c.bufw.Write(s2)
+	_, err = conn.bufw.Write(s2)
 	if err != nil {
 		return err
 	}
 
-	return c.bufw.Flush()
+	return conn.bufw.Flush()
 }
 
 // recvResponse recv C2
-func (c *conn) recvResponse() error {
+func (conn *conn) recvResponse() error {
 	// c2
 	c2 := make([]byte, HandshakeResponseSize)
-	if _, err := c.ReadFull(c2); err != nil {
+	if _, err := conn.ReadFull(c2); err != nil {
 		return err
 	}
 
