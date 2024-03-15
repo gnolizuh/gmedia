@@ -114,7 +114,7 @@ func (mux *ServeMux) serveSetChunkSize(msg *Message) error {
 		return errors.New("too big RTMP chunk size")
 	}
 
-	msg.ChunkStream.conn.setChunkSize(chunkSize)
+	msg.ChunkStream.conn.setRecvChunkSize(chunkSize)
 
 	log.Printf("set chunk size, chunk_size: %d", chunkSize)
 
@@ -208,10 +208,12 @@ func (mux *ServeMux) serveSetPeerBandwidth(msg *Message) error {
 }
 
 func (mux *ServeMux) serveAudio(msg *Message) error {
+	log.Printf("recevie audio message length: %d", msg.MessageLength)
 	return nil
 }
 
 func (mux *ServeMux) serveVideo(msg *Message) error {
+	log.Printf("recevie video message length: %d", msg.MessageLength)
 	return nil
 }
 
@@ -421,10 +423,7 @@ func (mux *ServeMux) serveConnect(msg *Message) error {
 	if err := msg.ChunkStream.conn.SendSetPeerBandwidth(DefaultAckWindowSize, DefaultLimitDynamic); err != nil {
 		return err
 	}
-	if err := msg.ChunkStream.conn.SendSetChunkSize(DefaultWriteChunkSize); err != nil {
-		return err
-	}
-	if err := msg.ChunkStream.conn.SendOnBWDone(); err != nil {
+	if err := msg.ChunkStream.conn.SendSetChunkSize(DefaultSendChunkSize); err != nil {
 		return err
 	}
 	if err := msg.ChunkStream.conn.SendConnectResult(transactionID, 0); err != nil {

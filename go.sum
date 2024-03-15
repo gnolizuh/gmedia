@@ -4,6 +4,8 @@ github.com/gnolizuh/gamf v0.0.0-20240306111557-eef639e4d652 h1:hGQI5BwQO/MSFLVhS
 github.com/gnolizuh/gamf v0.0.0-20240306111557-eef639e4d652/go.mod h1:mP+pNVKW4SFpgK55G77orqoZ1eRVlPhTcLAaQOLck58=
 github.com/gnolizuh/gamf v0.0.0-20240306122529-408c8a48599a h1:qbrKK9BkZKVveAOtjAgvHze7ybwSvI4R+6XmvZr4jLg=
 github.com/gnolizuh/gamf v0.0.0-20240306122529-408c8a48599a/go.mod h1:mP+pNVKW4SFpgK55G77orqoZ1eRVlPhTcLAaQOLck58=
+github.com/gnolizuh/gamf v0.0.0-20240313112045-b0abbbfc44e0 h1:QU6+rfrCrgE72RYDk8n4g5oangh5EygBUM33vT7ACrw=
+github.com/gnolizuh/gamf v0.0.0-20240313112045-b0abbbfc44e0/go.mod h1:mP+pNVKW4SFpgK55G77orqoZ1eRVlPhTcLAaQOLck58=
 github.com/mitchellh/mapstructure v1.5.0 h1:jeMsZIYE/09sWLaz43PL7Gy6RuMjD2eJVyuac5Z2hdY=
 github.com/mitchellh/mapstructure v1.5.0/go.mod h1:bFUtVrKA4DC2yAKiSyO/QUcy7e+RRV2QTWOzhPopBRo=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

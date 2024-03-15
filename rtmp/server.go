@@ -145,9 +145,10 @@ func (sh *serverHandler) ServeMessage(msg *Message) error {
 // Create new connection from conn.
 func (srv *Server) newConn(rwc net.Conn) *conn {
 	c := &conn{
-		server:    srv,
-		rwc:       rwc,
-		chunkSize: DefaultReadChunkSize,
+		server:        srv,
+		rwc:           rwc,
+		recvChunkSize: DefaultRecvChunkSize,
+		sendChunkSize: DefaultSendChunkSize,
 	}
 
 	c.epoch = uint32(time.Now().UnixNano() / 1000)
