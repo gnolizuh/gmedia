@@ -69,7 +69,9 @@ const (
 
 // ChunkStream : RTMP stream declare.
 type ChunkStream struct {
-	conn *conn
+	conn    *conn
+	prevhdr *Header
+	hdr     Header
 }
 
 func (cs *ChunkStream) abort() {
@@ -101,7 +103,7 @@ type conn struct {
 	bufw *bufio.Writer
 
 	// chunkStreams hold chunk stream tunnel.
-	chunkStreams []ChunkStream
+	chunkStreams []*ChunkStream
 
 	// recv and send chunk size
 	recvChunkSize uint32
@@ -116,6 +118,8 @@ type conn struct {
 
 	lastLimitType uint8
 	bandwidth     uint32
+
+	silent bool
 
 	// peer wrapper
 	peer Peer
@@ -238,16 +242,16 @@ func (conn *conn) SendAck(seq uint32) error {
 
 func (conn *conn) SendAckWinSize(win uint32) error {
 	msg := conn.NewMessage(conn.sendChunkSize)
-	msg.MessageTypeId = MessageTypeWindowAckSize
-	msg.ChunkStreamId = 2
+	msg.hdr.MessageTypeId = MessageTypeWinAckSize
+	msg.hdr.ChunkStreamId = ChunkStreamIdDefault
 	_ = binary.Write(msg, binary.BigEndian, win)
 	return msg.Send()
 }
 
 func (conn *conn) SendSetPeerBandwidth(win uint32, limit uint8) error {
 	msg := conn.NewMessage(conn.sendChunkSize)
-	msg.MessageTypeId = MessageTypeSetPeerBandwidth
-	msg.ChunkStreamId = 2
+	msg.hdr.MessageTypeId = MessageTypeSetPeerBandwidth
+	msg.hdr.ChunkStreamId = ChunkStreamIdDefault
 	_ = binary.Write(msg, binary.BigEndian, win)
 	_ = msg.WriteByte(limit)
 	return msg.Send()
@@ -255,8 +259,8 @@ func (conn *conn) SendSetPeerBandwidth(win uint32, limit uint8) error {
 
 func (conn *conn) SendSetChunkSize(cs uint32) error {
 	msg := conn.NewMessage(conn.sendChunkSize)
-	msg.MessageTypeId = MessageTypeSetChunkSize
-	msg.ChunkStreamId = 2
+	msg.hdr.MessageTypeId = MessageTypeSetChunkSize
+	msg.hdr.ChunkStreamId = ChunkStreamIdDefault
 	conn.setSendChunkSize(cs)
 	_ = binary.Write(msg, binary.BigEndian, cs)
 	return msg.Send()
@@ -275,17 +279,31 @@ func (conn *conn) SendConnectResult(tid uint32, encoding uint32) error {
 
 	b, _ := amf.Marshal("_result", tid, properties, information)
 	msg := conn.NewMessage(conn.sendChunkSize)
-	msg.MessageTypeId = MessageTypeAMF0Cmd
-	msg.ChunkStreamId = 3
+	msg.hdr.MessageTypeId = MessageTypeAMF0Command
+	msg.hdr.ChunkStreamId = ChunkStreamIdAMFInitial
 	_, _ = msg.Write(b)
 	return msg.Send()
 }
 
 func (conn *conn) SendCreateStreamResult(tid uint32, stream uint32) error {
 	msg := conn.NewMessage(conn.sendChunkSize)
-	msg.MessageTypeId = MessageTypeAMF0Cmd
-	msg.ChunkStreamId = 3
+	msg.hdr.MessageTypeId = MessageTypeAMF0Command
+	msg.hdr.ChunkStreamId = ChunkStreamIdAMFInitial
 	b, _ := amf.Marshal("_result", tid, nil, stream)
+	_, _ = msg.Write(b)
+	return msg.Send()
+}
+
+func (conn *conn) SendStatus(code, level, desc string) error {
+	description := make(map[string]any)
+	description["code"] = code
+	description["level"] = level
+	description["description"] = desc
+
+	msg := conn.NewMessage(conn.sendChunkSize)
+	msg.hdr.MessageTypeId = MessageTypeAMF0Command
+	msg.hdr.ChunkStreamId = ChunkStreamIdAMFInitial
+	b, _ := amf.Marshal("onStatus", 0, nil, description)
 	_, _ = msg.Write(b)
 	return msg.Send()
 }

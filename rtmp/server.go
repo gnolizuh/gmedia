@@ -123,7 +123,7 @@ var (
 )
 
 func (sh *serverHandler) ServeMessage(msg *Message) error {
-	th := sh.srv.TypeHandlers[msg.MessageTypeId]
+	th := sh.srv.TypeHandlers[msg.hdr.MessageTypeId]
 	if th != nil {
 		return th(msg)
 	}
@@ -156,9 +156,11 @@ func (srv *Server) newConn(rwc net.Conn) *conn {
 	c.bufr = bufio.NewReader(rwc)
 	c.bufw = bufio.NewWriter(rwc)
 
-	c.chunkStreams = make([]ChunkStream, MaxStreamsNum)
+	c.chunkStreams = make([]*ChunkStream, MaxStreamsNum)
 	for i := range c.chunkStreams {
-		c.chunkStreams[i].conn = c
+		c.chunkStreams[i] = &ChunkStream{
+			conn: c,
+		}
 	}
 
 	c.peer = Peer{

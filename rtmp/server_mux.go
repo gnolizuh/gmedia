@@ -51,7 +51,7 @@ func (mux *ServeMux) findTypeHandler(typ MessageType) TypeHandler {
 
 // ServeMessage dispatches the message to the handler.
 func (mux *ServeMux) ServeMessage(msg *Message) error {
-	h := mux.findTypeHandler(msg.MessageTypeId)
+	h := mux.findTypeHandler(msg.hdr.MessageTypeId)
 	if h == nil {
 		return errors.New("handler not found")
 	}
@@ -75,7 +75,7 @@ func regTypeHandlers() {
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAcknowledgement)
 		case MessageTypeUserControl:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveUserControl)
-		case MessageTypeWindowAckSize:
+		case MessageTypeWinAckSize:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveWindowAcknowledgementSize)
 		case MessageTypeSetPeerBandwidth:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveSetPeerBandwidth)
@@ -87,13 +87,13 @@ func regTypeHandlers() {
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAMF3Meta)
 		case MessageTypeAMF3Shared:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAMF3Shared)
-		case MessageTypeAMF3Cmd:
+		case MessageTypeAMF3Command:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAMF3Cmd)
 		case MessageTypeAMF0Meta:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAMF0Meta)
 		case MessageTypeAMF0Shared:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAMF0Shared)
-		case MessageTypeAMF0Cmd:
+		case MessageTypeAMF0Command:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAMF0Cmd)
 		case MessageTypeAggregate:
 			defaultServeMux.typeHandlers = append(defaultServeMux.typeHandlers, defaultServeMux.serveAggregate)
@@ -115,8 +115,6 @@ func (mux *ServeMux) serveSetChunkSize(msg *Message) error {
 	}
 
 	msg.ChunkStream.conn.setRecvChunkSize(chunkSize)
-
-	log.Printf("set chunk size, chunk_size: %d", chunkSize)
 
 	return nil
 }
@@ -208,12 +206,10 @@ func (mux *ServeMux) serveSetPeerBandwidth(msg *Message) error {
 }
 
 func (mux *ServeMux) serveAudio(msg *Message) error {
-	log.Printf("recevie audio message length: %d", msg.MessageLength)
 	return nil
 }
 
 func (mux *ServeMux) serveVideo(msg *Message) error {
-	log.Printf("recevie video message length: %d", msg.MessageLength)
 	return nil
 }
 
@@ -399,16 +395,16 @@ func regCommandHandlers() {
 }
 
 func (mux *ServeMux) serveConnect(msg *Message) error {
-	var transactionID uint32
+	var tid uint32
 	dec := amf.NewDecoder().WithReader(msg)
 
-	err := dec.Decode(&transactionID)
+	err := dec.Decode(&tid)
 	if err != nil {
 		return err
 	}
 
-	if transactionID != 1 {
-		return errors.New(fmt.Sprintf("unexpected transaction ID: %d", transactionID))
+	if tid != 1 {
+		return errors.New(fmt.Sprintf("unexpected transaction id: %d", tid))
 	}
 
 	var obj Command
@@ -426,7 +422,7 @@ func (mux *ServeMux) serveConnect(msg *Message) error {
 	if err := msg.ChunkStream.conn.SendSetChunkSize(DefaultSendChunkSize); err != nil {
 		return err
 	}
-	if err := msg.ChunkStream.conn.SendConnectResult(transactionID, 0); err != nil {
+	if err := msg.ChunkStream.conn.SendConnectResult(tid, 0); err != nil {
 		return err
 	}
 
@@ -444,14 +440,20 @@ func (mux *ServeMux) serveClose(msg *Message) error {
 }
 
 func (mux *ServeMux) serveCreateStream(msg *Message) error {
-	var transactionID uint32
-	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID)
-	if err != nil {
+	var tid uint32
+	if err := amf.NewDecoder().WithReader(msg).Decode(&tid); err != nil {
 		return err
 	}
 
-	if err := msg.ChunkStream.conn.SendCreateStreamResult(transactionID, DefaultMessageStreamID); err != nil {
+	if err := msg.ChunkStream.conn.SendCreateStreamResult(tid, DefaultMessageStreamID); err != nil {
 		return err
+	}
+
+	if !msg.ChunkStream.conn.silent {
+		if err := msg.ChunkStream.conn.SendStatus("NetStream.Publish.Start",
+			"status", "Start publishing"); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -478,9 +480,9 @@ func (mux *ServeMux) serveReceiveVideo(msg *Message) error {
 }
 
 func (mux *ServeMux) serveDeleteStream(msg *Message) error {
-	var transactionID uint32
+	var tid uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&tid, &null)
 	if err != nil {
 		return err
 	}
@@ -497,9 +499,9 @@ func (mux *ServeMux) serveDeleteStream(msg *Message) error {
 }
 
 func (mux *ServeMux) servePublish(msg *Message) error {
-	var transactionID uint32
+	var tid uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&tid, &null)
 	if err != nil {
 		return err
 	}
@@ -510,15 +512,15 @@ func (mux *ServeMux) servePublish(msg *Message) error {
 		return err
 	}
 
-	log.Println(name, typo)
+	log.Printf("publish: name='%s' type=%s", name, typo)
 
 	return nil
 }
 
 func (mux *ServeMux) servePlay(msg *Message) error {
-	var transactionID uint32
+	var tid uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&tid, &null)
 	if err != nil {
 		return err
 	}
@@ -547,9 +549,9 @@ func (mux *ServeMux) servePlay2(msg *Message) error {
 		StreamName string
 	}
 
-	var transactionID uint32
+	var tid uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&tid, &null)
 	if err != nil {
 		return err
 	}
@@ -567,9 +569,9 @@ func (mux *ServeMux) servePlay2(msg *Message) error {
 }
 
 func (mux *ServeMux) serveSeek(msg *Message) error {
-	var transactionID uint32
+	var tid uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&tid, &null)
 	if err != nil {
 		return err
 	}
@@ -586,9 +588,9 @@ func (mux *ServeMux) serveSeek(msg *Message) error {
 }
 
 func (mux *ServeMux) servePause(msg *Message) error {
-	var transactionID uint32
+	var tid uint32
 	var null []uint32
-	err := amf.NewDecoder().WithReader(msg).Decode(&transactionID, &null)
+	err := amf.NewDecoder().WithReader(msg).Decode(&tid, &null)
 	if err != nil {
 		return err
 	}

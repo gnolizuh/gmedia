@@ -59,7 +59,7 @@ const (
 	MessageTypeAbort
 	MessageTypeAck
 	MessageTypeUserControl
-	MessageTypeWindowAckSize
+	MessageTypeWinAckSize
 	MessageTypeSetPeerBandwidth
 )
 
@@ -71,19 +71,29 @@ const (
 const (
 	MessageTypeAMF3Meta = iota + MessageTypeVideo + 6 // 15
 	MessageTypeAMF3Shared
-	MessageTypeAMF3Cmd
+	MessageTypeAMF3Command
 	MessageTypeAMF0Meta
 	MessageTypeAMF0Shared
-	MessageTypeAMF0Cmd
+	MessageTypeAMF0Command
 )
 
 const (
-	MessageTypeAggregate = iota + MessageTypeAMF0Cmd + 2 // 22
+	MessageTypeAggregate = iota + MessageTypeAMF0Command + 2 // 22
 	MessageTypeMax
 )
 
 const (
 	MaxChunkSize = 10485760
+)
+
+const (
+	MessageStreamIdDefault = 1
+	ChunkStreamIdDefault   = 2
+
+	ChunkStreamIdAMFInitial = 3
+	ChunkStreamIdAMFDefault = 5
+	ChunkStreamIdAudio      = 6
+	ChunkStreamIdVideo      = 7
 )
 
 func (mt MessageType) String() string {
@@ -265,20 +275,20 @@ var chunkHeaderSize = []uint8{12, 8, 4, 1}
 
 func (chunk *Chunk) packaging(hdr *Header) *Header {
 	sz := uint32(chunk.chunks.msg.Len())
-	ts := chunk.chunks.msg.Timestamp
+	ts := chunk.chunks.msg.hdr.Timestamp
 
 	ft := uint8(0)
 	if hdr == nil {
 		hdr = &Header{}
-		hdr.MessageTypeId = chunk.chunks.msg.MessageTypeId
-		hdr.Timestamp = chunk.chunks.msg.Timestamp
-		hdr.ChunkStreamId = chunk.chunks.msg.ChunkStreamId
-		hdr.MessageStreamId = chunk.chunks.msg.MessageStreamId
-		hdr.MessageLength = chunk.chunks.msg.MessageLength
+		hdr.MessageTypeId = chunk.chunks.msg.hdr.MessageTypeId
+		hdr.Timestamp = chunk.chunks.msg.hdr.Timestamp
+		hdr.ChunkStreamId = chunk.chunks.msg.hdr.ChunkStreamId
+		hdr.MessageStreamId = chunk.chunks.msg.hdr.MessageStreamId
+		hdr.MessageLength = chunk.chunks.msg.hdr.MessageLength
 	} else {
-		if chunk.chunks.msg.MessageStreamId == hdr.MessageStreamId {
+		if chunk.chunks.msg.hdr.MessageStreamId == hdr.MessageStreamId {
 			ft++
-			if chunk.chunks.msg.MessageTypeId == hdr.MessageTypeId && sz == hdr.MessageLength {
+			if chunk.chunks.msg.hdr.MessageTypeId == hdr.MessageTypeId && sz == hdr.MessageLength {
 				ft++
 				if ts == hdr.Timestamp {
 					ft++
@@ -301,9 +311,9 @@ func (chunk *Chunk) packaging(hdr *Header) *Header {
 		hs += 4
 	}
 
-	if chunk.chunks.msg.ChunkStreamId >= 64 {
+	if chunk.chunks.msg.hdr.ChunkStreamId >= 64 {
 		hs++
-		if chunk.chunks.msg.ChunkStreamId >= 320 {
+		if chunk.chunks.msg.hdr.ChunkStreamId >= 320 {
 			hs++
 		}
 	}
@@ -313,17 +323,17 @@ func (chunk *Chunk) packaging(hdr *Header) *Header {
 
 	ftsize := 0
 	ftt := ft << 6
-	if chunk.chunks.msg.ChunkStreamId >= 2 && chunk.chunks.msg.ChunkStreamId <= 63 {
-		chunk.buf[h] = ftt | (uint8(chunk.chunks.msg.ChunkStreamId) & 0x3f)
+	if chunk.chunks.msg.hdr.ChunkStreamId >= 2 && chunk.chunks.msg.hdr.ChunkStreamId <= 63 {
+		chunk.buf[h] = ftt | (uint8(chunk.chunks.msg.hdr.ChunkStreamId) & 0x3f)
 		ftsize += 1
-	} else if chunk.chunks.msg.ChunkStreamId >= 64 && chunk.chunks.msg.ChunkStreamId < 320 {
+	} else if chunk.chunks.msg.hdr.ChunkStreamId >= 64 && chunk.chunks.msg.hdr.ChunkStreamId < 320 {
 		chunk.buf[h] = ftt
-		chunk.buf[h+1] = uint8(chunk.chunks.msg.ChunkStreamId - 64)
+		chunk.buf[h+1] = uint8(chunk.chunks.msg.hdr.ChunkStreamId - 64)
 		ftsize += 2
 	} else {
 		chunk.buf[h] = ftt | 0x01
-		chunk.buf[h+1] = uint8(chunk.chunks.msg.ChunkStreamId - 64)
-		chunk.buf[h+2] = uint8((chunk.chunks.msg.ChunkStreamId - 64) >> 8)
+		chunk.buf[h+1] = uint8(chunk.chunks.msg.hdr.ChunkStreamId - 64)
+		chunk.buf[h+2] = uint8((chunk.chunks.msg.hdr.ChunkStreamId - 64) >> 8)
 		ftsize += 3
 	}
 
@@ -337,13 +347,13 @@ func (chunk *Chunk) packaging(hdr *Header) *Header {
 			chunk.buf[h] = byte(sz >> 16)
 			chunk.buf[h+1] = byte(sz >> 8)
 			chunk.buf[h+2] = byte(sz)
-			chunk.buf[h+3] = byte(chunk.chunks.msg.MessageTypeId)
+			chunk.buf[h+3] = byte(chunk.chunks.msg.hdr.MessageTypeId)
 			h += 4
 			if ft == 0 {
-				chunk.buf[h] = byte(chunk.chunks.msg.MessageStreamId >> 24)
-				chunk.buf[h+1] = byte(chunk.chunks.msg.MessageStreamId >> 16)
-				chunk.buf[h+2] = byte(chunk.chunks.msg.MessageStreamId >> 8)
-				chunk.buf[h+3] = byte(chunk.chunks.msg.MessageStreamId)
+				chunk.buf[h] = byte(chunk.chunks.msg.hdr.MessageStreamId >> 24)
+				chunk.buf[h+1] = byte(chunk.chunks.msg.hdr.MessageStreamId >> 16)
+				chunk.buf[h+2] = byte(chunk.chunks.msg.hdr.MessageStreamId >> 8)
+				chunk.buf[h+3] = byte(chunk.chunks.msg.hdr.MessageStreamId)
 				h += 4
 			}
 		}
@@ -509,9 +519,9 @@ func (chunks *Chunks) packaging() error {
 		return nil
 	}
 
-	if chunks.msg.ChunkStreamId >= MaxStreamsNum {
+	if chunks.msg.hdr.ChunkStreamId >= MaxStreamsNum {
 		return errors.New(fmt.Sprintf("RTMP out chunk stream too big: %d >= %d",
-			chunks.msg.ChunkStreamId, MaxStreamsNum))
+			chunks.msg.hdr.ChunkStreamId, MaxStreamsNum))
 	}
 
 	var hdr *Header
@@ -530,10 +540,13 @@ var headerBufferPool = sync.Pool{
 	},
 }
 
-func newHeaderBuffer() []byte {
+func NewHeaderBuffer() []byte {
 	if v := headerBufferPool.Get(); v != nil {
-		hdr := v.([]byte)
-		return hdr
+		buf := v.([]byte)
+		for i := range buf {
+			buf[i] = 0
+		}
+		return buf
 	}
 	return make([]byte, MaxHeaderSize)
 }
@@ -557,11 +570,13 @@ type Header struct {
 
 	// Format identifies one of four format used by the chunk message header.
 	Format uint8
+
+	delta uint32
 }
 
 var headerPool sync.Pool
 
-func newHeader() *Header {
+func NewHeader() *Header {
 	if v := headerPool.Get(); v != nil {
 		hdr := v.(*Header)
 		return hdr
@@ -570,7 +585,7 @@ func newHeader() *Header {
 }
 
 func readHeader(conn *conn, hdr *Header) error {
-	buf := newHeaderBuffer()
+	buf := NewHeaderBuffer()
 	defer headerBufferPool.Put(buf)
 
 	// basic header
@@ -716,11 +731,10 @@ var messagePool sync.Pool
 // |                 (3 bytes)                     |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 type Message struct {
-	Header
-
 	ChunkStream *ChunkStream
 	Chunks      *Chunks
 
+	hdr  Header
 	conn *conn
 
 	// size we have
@@ -741,12 +755,12 @@ func (msg *Message) append(chunk *Chunk) {
 }
 
 func (msg *Message) completed() bool {
-	return msg.MessageLength == msg.has
+	return msg.hdr.MessageLength == msg.has
 }
 
 func (msg *Message) readChunk() error {
-	hdr := newHeader()
-	defer headerBufferPool.Put(hdr)
+	hdr := NewHeader()
+	// defer headerPool.Put(hdr)
 
 	err := readHeader(msg.conn, hdr)
 	if err != nil {
@@ -754,55 +768,67 @@ func (msg *Message) readChunk() error {
 	}
 
 	// indicate timestamp whether is absolute or relate.
-	cs := &msg.conn.chunkStreams[hdr.ChunkStreamId]
+	stm := msg.conn.chunkStreams[hdr.ChunkStreamId]
 	if msg.ChunkStream == nil {
-		msg.ChunkStream = cs
-	} else if msg.ChunkStream != cs {
+		msg.ChunkStream = stm
+	} else if msg.ChunkStream != stm {
 		panic("chunk-stream must be strictly continuous")
 	}
 
-	msg.Format = hdr.Format
-	msg.ChunkStreamId = hdr.ChunkStreamId
+	stm.hdr.Format = hdr.Format
+	stm.hdr.ChunkStreamId = hdr.ChunkStreamId
 	switch hdr.Format {
 	case 0:
-		msg.Timestamp = hdr.Timestamp
-		msg.MessageLength = hdr.MessageLength
-		msg.MessageTypeId = hdr.MessageTypeId
-		msg.MessageStreamId = hdr.MessageStreamId
+		stm.hdr.Timestamp = hdr.Timestamp
+		stm.hdr.MessageTypeId = hdr.MessageTypeId
+		stm.hdr.MessageLength = hdr.MessageLength
+		stm.hdr.MessageStreamId = hdr.MessageStreamId
 	case 1:
-		msg.Timestamp += hdr.Timestamp
-		msg.MessageLength = hdr.MessageLength
-		msg.MessageTypeId = hdr.MessageTypeId
+		stm.hdr.delta = hdr.Timestamp
+		stm.hdr.Timestamp += stm.hdr.delta
+		stm.hdr.MessageTypeId = hdr.MessageTypeId
+		stm.hdr.MessageLength = hdr.MessageLength
 	case 2:
-		msg.Timestamp += hdr.Timestamp
+		stm.hdr.delta = hdr.Timestamp
+		stm.hdr.Timestamp += stm.hdr.delta
 	case 3:
 		// see https://rtmp.veriskope.com/docs/spec/#53124-type-3
-		if msg != nil && msg.Format == 0 {
-			msg.Timestamp += hdr.Timestamp
+		switch stm.prevhdr.Format {
+		case 0:
+			stm.hdr.Timestamp += stm.prevhdr.Timestamp
+		case 2:
+			stm.hdr.Timestamp += stm.hdr.delta
 		}
 
 		// read extend timestamp
-		if msg.Timestamp == 0x00ffffff {
+		if stm.hdr.Timestamp == 0x00ffffff {
 			buf := make([]byte, 4)
 			_, err := msg.conn.ReadFull(buf)
 			if err != nil {
 				return err
 			}
-			msg.Timestamp = binary.BigEndian.Uint32(buf)
+			stm.hdr.Timestamp = binary.BigEndian.Uint32(buf)
 		}
 	default:
 		panic("unknown format type")
 	}
 
+	msg.hdr = stm.hdr
+	stm.prevhdr = hdr
+
 	// calculate bytes needed.
-	need := int(math.Min(float64(msg.MessageLength-msg.has), float64(msg.conn.recvChunkSize)))
+	rest := int(math.Min(float64(stm.hdr.MessageLength-msg.has), float64(msg.conn.recvChunkSize)))
 
 	chunk := msg.Chunks.NewChunk()
 	reader := ChunkReader{conn: msg.conn, chunk: chunk}
-	if _, err = reader.ReadN(need); err != nil {
+	if _, err = reader.ReadN(rest); err != nil {
 		return err
 	}
 	msg.append(chunk)
+
+	log.Printf("RTMP read chunk frag fmt=%d msid=%d csid=%d type=%d mlen=%d ts=%d clen=%d",
+		stm.hdr.Format, stm.hdr.MessageStreamId, stm.hdr.ChunkStreamId, stm.hdr.MessageTypeId,
+		stm.hdr.MessageLength, stm.hdr.Timestamp, rest)
 
 	return nil
 }
